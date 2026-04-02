@@ -1,0 +1,139 @@
+---
+title: "Rust Usage Guide"
+description: "Getting started with s2n-tls Rust bindings — config, connections, and async I/O with Tokio"
+---
+
+## Installation
+
+Add the crates you need to `Cargo.toml`:
+
+<CodeGroup>
+
+```toml Cargo.toml (blocking)
+[dependencies]
+s2n-tls = "0"
+```
+
+```toml Cargo.toml (async/Tokio)
+[dependencies]
+s2n-tls = "0"
+s2n-tls-tokio = "0"
+tokio = { version = "1", features = ["full"] }
+```
+
+</CodeGroup>
+
+s2n-tls-sys (the C library) is compiled automatically as part of the build. You do not need to install s2n-tls separately.
+
+## Async TLS client (Tokio)
+
+The following example is drawn from the [tokio-server-client example](https://github.com/aws/s2n-tls/tree/main/bindings/rust-examples/tokio-server-client) in the s2n-tls repository:
+
+```rust client.rs
+use s2n_tls::{config::Config, security::DEFAULT_TLS13};
+use s2n_tls_tokio::TlsConnector;
+use tokio::{io::AsyncWriteExt, net::TcpStream};
+
+async fn run_client(trust_pem: &[u8], addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Build config with trust store and security policy
+    let mut config = Config::builder();
+    config.set_security_policy(&DEFAULT_TLS13)?;
+    config.trust_pem(trust_pem)?;
+
+    // Create the TlsConnector
+    let client = TlsConnector::new(config.build()?);
+
+    // Connect and perform TLS handshake
+    let stream = TcpStream::connect(addr).await?;
+    let tls = client.connect("example.com", stream).await?;
+
+    // Split for concurrent read/write
+    let (mut reader, mut writer) = tokio::io::split(tls);
+
+    tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        tokio::io::copy(&mut reader, &mut stdout).await
+    });
+
+    let mut stdin = tokio::io::stdin();
+    tokio::io::copy(&mut stdin, &mut writer).await?;
+    writer.shutdown().await?;
+
+    Ok(())
+}
+```
+
+## Async TLS server (Tokio)
+
+```rust server.rs
+use s2n_tls::{config::Config, security::DEFAULT_TLS13};
+use s2n_tls_tokio::TlsAcceptor;
+use tokio::net::TcpListener;
+
+async fn run_server(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    addr: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Build config with certificate and key
+    let mut config = Config::builder();
+    config.set_security_policy(&DEFAULT_TLS13)?;
+    config.load_pem(cert_pem, key_pem)?;
+
+    let server = TlsAcceptor::new(config.build()?);
+    let listener = TcpListener::bind(addr).await?;
+
+    loop {
+        let (stream, _peer_addr) = listener.accept().await?;
+        let tls = server.accept(stream).await?;
+        let (mut reader, mut writer) = tokio::io::split(tls);
+        tokio::io::copy(&mut reader, &mut writer).await?;
+    }
+}
+```
+
+## Config builder
+
+The `Config::builder()` API mirrors the C `s2n_config` API:
+
+```rust
+use s2n_tls::{config::Config, security::DEFAULT_TLS13};
+
+let mut builder = Config::builder();
+
+// Set security policy (cipher suites + protocol versions)
+builder.set_security_policy(&DEFAULT_TLS13)?;
+
+// Add CA certificate for peer verification
+builder.trust_pem(ca_pem_bytes)?;
+
+// Load server certificate and private key
+builder.load_pem(cert_pem_bytes, key_pem_bytes)?;
+
+let config = builder.build()?;
+```
+
+## Available security policies
+
+```rust
+use s2n_tls::security;
+
+security::DEFAULT          // Latest recommended defaults (may change)
+security::DEFAULT_TLS13    // TLS 1.3 default policy
+security::DEFAULT_FIPS     // FIPS-compatible policy
+```
+
+## Error handling
+
+All s2n-tls Rust functions return `Result<T, s2n_tls::error::Error>`. The error type implements `std::error::Error` and includes the underlying s2n-tls error code and message.
+
+```rust
+match config.set_security_policy(&DEFAULT_TLS13) {
+    Ok(()) => {},
+    Err(e) => eprintln!("Failed to set policy: {}", e),
+}
+```
+
+## Full API documentation
+
+The complete Rust API reference is available on [docs.rs/s2n-tls](https://docs.rs/s2n-tls/latest/s2n_tls/).

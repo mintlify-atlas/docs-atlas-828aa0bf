@@ -1,0 +1,114 @@
+---
+title: "I/O API"
+description: "Reference for s2n-tls I/O functions — handshake, send, receive, and shutdown"
+---
+
+s2n-tls I/O functions map closely to POSIX I/O conventions. All I/O functions take an `s2n_blocked_status *blocked` parameter that indicates what the operation is waiting on when it returns `S2N_FAILURE` with error type `S2N_ERR_T_BLOCKED`.
+
+## s2n_blocked_status
+
+```c
+typedef enum {
+    S2N_NOT_BLOCKED = 0,
+    S2N_BLOCKED_ON_READ,
+    S2N_BLOCKED_ON_WRITE,
+    S2N_BLOCKED_ON_APPLICATION_INPUT,
+    S2N_BLOCKED_ON_EARLY_DATA,
+} s2n_blocked_status;
+```
+
+Only meaningful when the I/O function returns `S2N_FAILURE` and `s2n_error_get_type(s2n_errno) == S2N_ERR_T_BLOCKED`.
+
+## Handshake
+
+```c
+int s2n_negotiate(struct s2n_connection *conn, s2n_blocked_status *blocked);
+```
+
+Performs the TLS handshake. Call repeatedly until it returns `S2N_SUCCESS` (non-blocking mode) or it returns once on success (blocking mode).
+
+```c
+s2n_blocked_status blocked;
+while (s2n_negotiate(conn, &blocked) != S2N_SUCCESS) {
+    if (s2n_error_get_type(s2n_errno) != S2N_ERR_T_BLOCKED) {
+        /* real error */
+        break;
+    }
+    /* wait for socket to be ready based on `blocked` value */
+}
+```
+
+## Sending data
+
+```c
+ssize_t s2n_send(struct s2n_connection *conn, const void *buf,
+    ssize_t size, s2n_blocked_status *blocked);
+
+ssize_t s2n_sendv(struct s2n_connection *conn, const struct iovec *bufs,
+    ssize_t count, s2n_blocked_status *blocked);
+
+ssize_t s2n_sendv_with_offset(struct s2n_connection *conn,
+    const struct iovec *bufs, ssize_t count, ssize_t offs,
+    s2n_blocked_status *blocked);
+```
+
+Returns the number of bytes written, or `-1` on failure. In non-blocking mode, fewer bytes than requested may be written. Use `s2n_sendv_with_offset()` to resume a partial send.
+
+<Warning>
+Always pass the same buffer to `s2n_send()` on retry — s2n-tls may have partially encrypted data that must be flushed before new data is accepted.
+</Warning>
+
+## Receiving data
+
+```c
+ssize_t s2n_recv(struct s2n_connection *conn, void *buf,
+    ssize_t size, s2n_blocked_status *blocked);
+```
+
+Returns the number of bytes read, `0` on connection close, or `-1` on failure.
+
+## Shutdown
+
+```c
+int s2n_shutdown(struct s2n_connection *conn, s2n_blocked_status *blocked);
+int s2n_shutdown_send(struct s2n_connection *conn, s2n_blocked_status *blocked);
+```
+
+- `s2n_shutdown()` — sends a close_notify alert and waits to receive one from the peer. Call repeatedly until success in non-blocking mode.
+- `s2n_shutdown_send()` — sends a close_notify without waiting for the peer's response. Useful when the peer is not expected to respond.
+
+## File descriptor setup
+
+```c
+int s2n_connection_set_fd(struct s2n_connection *conn, int fd);
+int s2n_connection_set_read_fd(struct s2n_connection *conn, int readfd);
+int s2n_connection_set_write_fd(struct s2n_connection *conn, int writefd);
+```
+
+Set the file descriptor(s) s2n-tls will use for I/O. Use separate read/write fds for full-duplex operation.
+
+## Custom I/O callbacks
+
+```c
+typedef int s2n_recv_fn(void *io_context, uint8_t *buf, uint32_t len);
+typedef int s2n_send_fn(void *io_context, const uint8_t *buf, uint32_t len);
+
+int s2n_connection_set_recv_cb(struct s2n_connection *conn, s2n_recv_fn recv);
+int s2n_connection_set_send_cb(struct s2n_connection *conn, s2n_send_fn send);
+int s2n_connection_set_recv_ctx(struct s2n_connection *conn, void *ctx);
+int s2n_connection_set_send_ctx(struct s2n_connection *conn, void *ctx);
+```
+
+Replace the default socket I/O with custom send/receive functions. The callback must return the number of bytes transferred, or `-1` and set `errno` to `EWOULDBLOCK` to signal blocking.
+
+## TCP corking
+
+```c
+int s2n_connection_use_corked_io(struct s2n_connection *conn);
+```
+
+Enables TCP_CORK (or TCP_NOPUSH/TCP_NODELAY) during the handshake to reduce round trips. Useful for latency-sensitive applications.
+
+<Note>
+s2n-tls does **not** handle `SIGPIPE`. Call `signal(SIGPIPE, SIG_IGN)` before using s2n-tls I/O to prevent process termination on broken pipes.
+</Note>

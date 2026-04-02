@@ -1,0 +1,203 @@
+---
+title: "Lifecycle"
+description: "Initialize and shut down the s2n-tls library, override memory callbacks, and control atexit behavior."
+---
+
+## Overview
+
+Before calling any other s2n-tls function, the library must be initialized with `s2n_init()`. Some behaviors — such as crypto initialization and the atexit handler — can be adjusted by calling modifier functions **before** `s2n_init()`.
+
+## Initialization
+
+### s2n_init
+
+```c
+S2N_API extern int s2n_init(void);
+```
+
+Initializes the s2n-tls library. Must be called once before any other s2n-tls function.
+
+<Warning>
+This function is not thread-safe. Call it exactly once from a single thread before spawning any threads that use s2n-tls.
+</Warning>
+
+**Returns:** `S2N_SUCCESS` (0) on success, `S2N_FAILURE` (-1) on failure.
+
+---
+
+### s2n_crypto_disable_init
+
+```c
+S2N_API extern int s2n_crypto_disable_init(void);
+```
+
+Prevents s2n-tls from calling `OPENSSL_init_crypto`, `OPENSSL_cleanup`, or `EVP_cleanup` on OpenSSL versions prior to 1.1.x. Use this when your application or language runtime also initializes OpenSSL, to avoid double-initialization conflicts.
+
+<Warning>
+Must be called **before** `s2n_init()`. Returns `S2N_FAILURE` if s2n-tls is already initialized.
+</Warning>
+
+If you call this with OpenSSL/libcrypto older than 1.1.x, you are responsible for calling `OPENSSL_add_all_algorithms()` or `OPENSSL_init_crypto()` yourself before EVP APIs will function.
+
+**Returns:** `S2N_SUCCESS` on success, `S2N_FAILURE` on failure.
+
+---
+
+### s2n_disable_atexit
+
+```c
+S2N_API extern int s2n_disable_atexit(void);
+```
+
+Prevents s2n-tls from registering an atexit handler. This is useful when s2n-tls is loaded as a re-entrant shared library, where the atexit handler could be invoked at an unsafe point.
+
+<Warning>
+Must be called **before** `s2n_init()`. When disabled, you must call `s2n_cleanup_final()` explicitly before process exit.
+</Warning>
+
+**Returns:** `S2N_SUCCESS` on success, `S2N_FAILURE` on failure.
+
+---
+
+## Teardown
+
+### s2n_cleanup
+
+```c
+S2N_API extern int s2n_cleanup(void);
+```
+
+Call from every thread created after `s2n_init()` to release thread-local state. s2n-tls attempts to clean up thread-local memory automatically at thread exit via pthread destructors, but this may not work with all threading libraries. Calling `s2n_cleanup()` explicitly ensures correct cleanup.
+
+**Returns:** `S2N_SUCCESS` on success, `S2N_FAILURE` on failure.
+
+---
+
+### s2n_cleanup_final
+
+```c
+S2N_API extern int s2n_cleanup_final(void);
+```
+
+Performs a complete deinitialization and cleanup of the s2n-tls library. Frees memory allocated at initialization that is intended to persist for the process lifetime.
+
+Not calling this function may cause ASAN or Valgrind to report memory leaks. If `s2n_disable_atexit()` was called, this function **must** be called before process exit.
+
+**Returns:** `S2N_SUCCESS` on success, `S2N_FAILURE` on failure.
+
+---
+
+## FIPS mode
+
+### s2n_get_fips_mode
+
+```c
+typedef enum { S2N_FIPS_MODE_DISABLED, S2N_FIPS_MODE_ENABLED } s2n_fips_mode;
+
+S2N_API extern int s2n_get_fips_mode(s2n_fips_mode *fips_mode);
+```
+
+Returns whether s2n-tls is running in FIPS mode. FIPS mode is enabled automatically when s2n-tls is built with a FIPS-validated libcrypto (AWS-LC FIPS or OpenSSL 3.0 FIPS).
+
+**Returns:** `S2N_SUCCESS` on success, `S2N_FAILURE` on failure. Sets `*fips_mode` to `S2N_FIPS_MODE_ENABLED` or `S2N_FIPS_MODE_DISABLED`.
+
+```c
+s2n_fips_mode fips_mode;
+if (s2n_get_fips_mode(&fips_mode) == S2N_SUCCESS &&
+    fips_mode == S2N_FIPS_MODE_ENABLED) {
+    printf("Running in FIPS mode\n");
+}
+```
+
+---
+
+## Memory callbacks
+
+By default, s2n-tls uses the system allocator for all internal memory. You can override this by providing custom callbacks before calling `s2n_init()`.
+
+### Callback types
+
+```c
+/* Called when s2n_init() executes. */
+typedef int (*s2n_mem_init_callback)(void);
+
+/* Called when s2n_cleanup() executes. */
+typedef int (*s2n_mem_cleanup_callback)(void);
+
+/*
+ * Allocates at least `requested` bytes.
+ * Must store the allocation address in *ptr and the actual
+ * allocated size in *allocated. May allocate more than requested.
+ * s2n-tls will use all allocated bytes and attempt to free them.
+ */
+typedef int (*s2n_mem_malloc_callback)(void **ptr, uint32_t requested, uint32_t *allocated);
+
+/* Frees memory previously allocated by s2n_mem_malloc_callback. */
+typedef int (*s2n_mem_free_callback)(void *ptr, uint32_t size);
+```
+
+---
+
+### s2n_mem_set_callbacks
+
+```c
+S2N_API extern int s2n_mem_set_callbacks(
+    s2n_mem_init_callback    mem_init_callback,
+    s2n_mem_cleanup_callback mem_cleanup_callback,
+    s2n_mem_malloc_callback  mem_malloc_callback,
+    s2n_mem_free_callback    mem_free_callback
+);
+```
+
+Replaces s2n-tls's internal memory management functions with caller-provided implementations.
+
+<Warning>
+Must be called **before** `s2n_init()`.
+</Warning>
+
+<ParamField path="mem_init_callback" type="s2n_mem_init_callback" required>
+  Called during `s2n_init()`. Use to initialize any state your allocator needs.
+</ParamField>
+
+<ParamField path="mem_cleanup_callback" type="s2n_mem_cleanup_callback" required>
+  Called during `s2n_cleanup()`. Use to tear down allocator state.
+</ParamField>
+
+<ParamField path="mem_malloc_callback" type="s2n_mem_malloc_callback" required>
+  Allocation function. Must write the allocation address to `*ptr` and the actual allocated byte count to `*allocated`. May allocate more than `requested`.
+</ParamField>
+
+<ParamField path="mem_free_callback" type="s2n_mem_free_callback" required>
+  Deallocation function. Receives the pointer and the size that was reported in `*allocated` at allocation time.
+</ParamField>
+
+**Returns:** `S2N_SUCCESS` on success, `S2N_FAILURE` on failure.
+
+---
+
+## Typical initialization sequence
+
+```c
+#include <s2n.h>
+
+int main(void) {
+    /* Optional: configure before init */
+    if (s2n_disable_atexit() != S2N_SUCCESS) {
+        /* handle error */
+    }
+
+    /* Required: initialize the library */
+    if (s2n_init() != S2N_SUCCESS) {
+        fprintf(stderr, "s2n_init failed: %s\n", s2n_strerror(s2n_errno, "EN"));
+        return 1;
+    }
+
+    /* ... use s2n-tls ... */
+
+    /* Required when atexit is disabled */
+    if (s2n_cleanup_final() != S2N_SUCCESS) {
+        /* handle error */
+    }
+    return 0;
+}
+```

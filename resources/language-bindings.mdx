@@ -1,0 +1,89 @@
+---
+title: "Language bindings"
+description: "Official Rust bindings for s2n-tls and third-party bindings for Lua, Python, and Scala."
+---
+
+s2n-tls is a C library with an official set of Rust bindings maintained by the s2n-tls team. Community-maintained bindings also exist for Lua, Python, and Scala.
+
+## Official Rust bindings
+
+The Rust bindings are maintained as part of the [s2n-tls repository](https://github.com/aws/s2n-tls) under `bindings/rust/`. They are published to [crates.io](https://crates.io/crates/s2n-tls) and documented on [docs.rs](https://docs.rs/s2n-tls/latest/s2n_tls/).
+
+Add the crate to your project:
+
+```toml
+[dependencies]
+s2n-tls = "*"
+s2n-tls-tokio = "*"   # optional: async I/O with Tokio
+```
+
+### Crate structure
+
+The `bindings/rust/` directory contains two workspaces with different MSRV policies:
+
+<CardGroup cols={2}>
+  <Card title="standard workspace" icon="box">
+    Rolling MSRV policy of at least 6 months. Contains `s2n-tls-hyper` for HTTP integration and `s2n-tls-metrics-subscriber` for observability hooks.
+  </Card>
+  <Card title="extended workspace" icon="box-archive">
+    Older MSRV (currently 1.77.0) for broader compatibility. Contains the primary `s2n-tls` and `s2n-tls-sys` crates, plus `s2n-tls-tokio` for async support.
+  </Card>
+</CardGroup>
+
+The key crates in the `extended` workspace are:
+
+| Crate | Purpose |
+|---|---|
+| `s2n-tls` | High-level Rust API for s2n-tls |
+| `s2n-tls-sys` | Low-level auto-generated FFI bindings |
+| `s2n-tls-tokio` | Async TLS streams for the Tokio runtime |
+
+### Basic usage
+
+```rust
+use s2n_tls::config::Config;
+use s2n_tls::enums::Mode;
+
+let mut config = Config::builder();
+config.set_security_policy(&security_policy::DEFAULT_TLS13)?;
+config.trust_pem(ca_cert_pem)?;
+let config = config.build()?;
+```
+
+<Note>
+  The Rust bindings are subject to change. Review the [MSRV policy](https://github.com/aws/s2n-tls/tree/main/bindings/rust#minimum-supported-rust-version-msrv) before taking a dependency in production.
+</Note>
+
+## Third-party bindings
+
+The following bindings are community-maintained and are not part of the s2n-tls project. They are listed here for discoverability.
+
+<CardGroup cols={3}>
+  <Card
+    title="LJIT2s2n (Lua)"
+    icon="code"
+    href="https://github.com/wiladams/LJIT2s2n"
+  >
+    LuaJIT FFI bindings for s2n-tls, enabling use of s2n-tls from Lua via the LuaJIT foreign function interface.
+  </Card>
+  <Card
+    title="cys2n (Python)"
+    icon="python"
+    href="https://github.com/samrushing/cys2n"
+  >
+    Cython-based Python bindings for s2n-tls, providing a Python interface to the s2n-tls C API.
+  </Card>
+  <Card
+    title="FS2 (Scala)"
+    icon="code"
+    href="https://fs2.io/#/io?id=tls"
+  >
+    TLS support in the FS2 streaming I/O library for Scala, which includes an s2n-tls backend for Scala Native.
+  </Card>
+</CardGroup>
+
+<Note>
+  Third-party bindings are not maintained by the s2n-tls team. For issues or questions about these bindings, refer to their respective repositories.
+</Note>
+
+If you know of a binding not listed here, [open an issue](https://github.com/aws/s2n-tls/issues) or submit a pull request to update the [BINDINGS.md](https://github.com/aws/s2n-tls/blob/main/docs/BINDINGS.md) source file.

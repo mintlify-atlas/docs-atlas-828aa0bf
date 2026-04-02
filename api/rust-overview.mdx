@@ -1,0 +1,52 @@
+---
+title: "Rust Bindings Overview"
+description: "Overview of the s2n-tls Rust crates — s2n-tls, s2n-tls-sys, and s2n-tls-tokio"
+---
+
+s2n-tls provides first-class Rust bindings maintained in the [aws/s2n-tls](https://github.com/aws/s2n-tls) repository under `bindings/rust/`.
+
+<CardGroup cols={2}>
+  <Card title="s2n-tls" icon="crab" href="https://crates.io/crates/s2n-tls">
+    High-level safe Rust API for TLS connections
+  </Card>
+  <Card title="s2n-tls-tokio" icon="bolt" href="https://crates.io/crates/s2n-tls-tokio">
+    Async TLS streams built on Tokio
+  </Card>
+  <Card title="s2n-tls-sys" icon="gear" href="https://crates.io/crates/s2n-tls-sys">
+    Low-level unsafe FFI bindings to the C API
+  </Card>
+  <Card title="docs.rs" icon="book" href="https://docs.rs/s2n-tls/latest/s2n_tls/">
+    Full API documentation on docs.rs
+  </Card>
+</CardGroup>
+
+## Crate descriptions
+
+### s2n-tls
+
+The primary crate for most users. Provides safe, idiomatic Rust wrappers around the s2n-tls C library:
+- `Config` — wraps `s2n_config`
+- `Connection` — wraps `s2n_connection`
+- Certificate loading helpers
+- Security policy configuration
+
+### s2n-tls-tokio
+
+Async TLS for Tokio applications. Provides `TlsAcceptor` and `TlsConnector` that wrap `tokio::net::TcpStream` into async TLS streams compatible with `tokio::io::AsyncRead` / `AsyncWrite`.
+
+### s2n-tls-sys
+
+Auto-generated FFI bindings directly to the C API. Use this only when you need access to functions not yet exposed by the high-level `s2n-tls` crate.
+
+## Workspace structure
+
+```
+bindings/rust/
+├── standard/        # s2n-tls and s2n-tls-sys crates
+└── extended/        # s2n-tls-tokio and other extended crates
+```
+
+## See also
+
+- [Rust Usage Guide](/api/rust-usage) — Getting started with the Rust crates
+- [Language Bindings](/resources/language-bindings) — All supported language bindings

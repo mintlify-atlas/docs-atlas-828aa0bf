@@ -1,0 +1,130 @@
+---
+title: "Private key operations"
+description: "How to offload TLS private key operations in s2n-tls, including asynchronous execution, synchronous callbacks, and PKCS#11-style offloading without direct key access."
+---
+
+By default, s2n-tls uses the configured private key to synchronously perform the signature and decryption operations required for a TLS handshake. Two common situations require a different approach:
+
+- **Async event loops** — signature and decryption are CPU-intensive. Performing them synchronously blocks the event loop for each handshake.
+- **No direct key access** — some environments, such as PKCS#11 tokens, hold the private key in a separate module that performs operations on the application's behalf.
+
+s2n-tls handles both cases through a single callback set with `s2n_config_set_async_pkey_callback()`. The callback fires every time `s2n_negotiate()` needs the private key. It receives **op**, an opaque object representing the operation. To avoid memory leaks, **op** must always eventually be freed by calling `s2n_async_pkey_op_free()`.
+
+<Note>
+  Despite the "async" naming, the callback can also be used to complete operations synchronously. The name reflects the mechanism, not a requirement.
+</Note>
+
+## Asynchronous private key operations
+
+When s2n-tls runs in non-blocking mode, private key operations can be handed off to a separate thread so the main event loop is not blocked.
+
+<Steps>
+  <Step title="Return from the callback without calling perform or apply">
+    Spawn a thread to process **op**, then return `S2N_SUCCESS` immediately from the callback without waiting for the thread.
+
+    ```c
+    int my_pkey_callback(struct s2n_connection *conn, struct s2n_async_pkey_op *op)
+    {
+        /* Dispatch to a worker thread, do not block here */
+        enqueue_pkey_op(op);
+        return S2N_SUCCESS;
+    }
+    ```
+  </Step>
+  <Step title="Observe the blocked status in your event loop">
+    `s2n_negotiate()` returns `S2N_FAILURE` with error type `S2N_ERR_T_BLOCKED` and `s2n_blocked_status` set to `S2N_BLOCKED_ON_APPLICATION_INPUT`. All subsequent calls return the same result until the operation is finalized.
+  </Step>
+  <Step title="Perform and apply the operation on the worker thread">
+    Retrieve the private key, perform the operation, then apply it to allow the handshake to continue.
+
+    ```c
+    void process_pkey_op(struct s2n_async_pkey_op *op, struct s2n_connection *conn)
+    {
+        struct s2n_cert_chain_and_key *chain_and_key =
+            s2n_connection_get_selected_cert(conn);
+        s2n_cert_private_key *pkey =
+            s2n_cert_chain_and_key_get_private_key(chain_and_key);
+
+        s2n_async_pkey_op_perform(op, pkey);
+        s2n_async_pkey_op_apply(op, conn);
+        s2n_async_pkey_op_free(op);
+    }
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  It is not safe to call functions on the same **conn** or **op** objects from two threads simultaneously. However, it is safe to have one thread call a function that only touches **conn** while another thread calls a function that only touches **op**, because those objects are not coupled. You may also free **conn** or **op** at any time, except that **conn** cannot be freed inside the `s2n_async_pkey_fn()` callback itself.
+</Warning>
+
+## Synchronous private key operations
+
+To complete the operation inside the callback, call `s2n_async_pkey_op_perform()` and `s2n_async_pkey_op_apply()` before returning. The handshake continues without interruption on success. On failure, `s2n_negotiate()` returns an error of type `S2N_ERR_T_INTERNAL`.
+
+```c
+int my_sync_pkey_callback(struct s2n_connection *conn, struct s2n_async_pkey_op *op)
+{
+    struct s2n_cert_chain_and_key *chain_and_key =
+        s2n_connection_get_selected_cert(conn);
+    s2n_cert_private_key *pkey =
+        s2n_cert_chain_and_key_get_private_key(chain_and_key);
+
+    if (s2n_async_pkey_op_perform(op, pkey) != S2N_SUCCESS) {
+        return S2N_FAILURE;
+    }
+    if (s2n_async_pkey_op_apply(op, conn) != S2N_SUCCESS) {
+        return S2N_FAILURE;
+    }
+
+    s2n_async_pkey_op_free(op);
+    return S2N_SUCCESS;
+}
+```
+
+## Offloading private key operations
+
+When the private key is held in an external module (such as a PKCS#11 token) and the application cannot access it directly, use `s2n_async_pkey_op_set_output()` instead of `s2n_async_pkey_op_perform()` to supply the result of the operation rather than letting s2n-tls perform it.
+
+<Steps>
+  <Step title="Determine the operation type">
+    Query what kind of private key operation is being requested.
+
+    ```c
+    s2n_async_pkey_op_type op_type;
+    s2n_async_pkey_op_get_op_type(op, &op_type);
+    ```
+  </Step>
+  <Step title="Read the operation input">
+    Determine the required input buffer size and copy the input data out of s2n-tls.
+
+    ```c
+    uint32_t input_size = 0;
+    s2n_async_pkey_op_get_input_size(op, &input_size);
+
+    uint8_t *input = malloc(input_size);
+    s2n_async_pkey_op_get_input(op, input, input_size);
+    ```
+  </Step>
+  <Step title="Perform the operation in the external module">
+    Pass the input to the external module (for example, a PKCS#11 sign or decrypt call) and collect the output bytes.
+
+    ```c
+    uint8_t *output = NULL;
+    uint32_t output_size = 0;
+    external_module_perform(op_type, input, input_size, &output, &output_size);
+    free(input);
+    ```
+  </Step>
+  <Step title="Set the output and apply">
+    Write the result back into s2n-tls and finalize the operation.
+
+    ```c
+    s2n_async_pkey_op_set_output(op, output, output_size);
+    s2n_async_pkey_op_apply(op, conn);
+    s2n_async_pkey_op_free(op);
+    free(output);
+    ```
+  </Step>
+</Steps>
+
+Offloading can be done synchronously or asynchronously. If the offloaded operation fails synchronously, return `S2N_FAILURE` from the callback. If it fails asynchronously, s2n-tls does not provide a channel to report that failure — instead, shut down and clean up the connection as you would for any other error.

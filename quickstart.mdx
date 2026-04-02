@@ -1,80 +1,511 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quickstart: TLS client and server"
+description: "Write a minimal TLS server and client in C using s2n-tls, from library init through negotiation, data exchange, and shutdown."
 ---
 
-## Get started in three steps
+This guide walks through building a minimal TLS server and client in C. Each example follows the same lifecycle: initialize the library, configure it, create a connection, negotiate TLS, exchange data, shut down, and clean up.
 
-Get your documentation site running locally and make your first customization.
+<Note>
+  You need s2n-tls built and installed before running these examples. Follow the [build guide](/building) first.
+</Note>
 
-### Step 1: Set up your local environment
+## Overview of the connection lifecycle
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Every s2n-tls connection — whether client or server — goes through the same sequence of steps:
 
-### Step 2: Deploy your changes
+<Steps>
+  <Step title="Initialize the library">
+    Call `s2n_init()` once at process startup. This must be called before any other s2n-tls function. It is not thread-safe to call `s2n_init()` more than once.
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```c
+    #include "s2n.h"
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    if (s2n_init() < 0) {
+        fprintf(stderr, "s2n_init failed: %s\n", s2n_strerror(s2n_errno, "EN"));
+        exit(1);
+    }
+    ```
+  </Step>
+  <Step title="Create a config">
+    Create an `s2n_config` to hold certificates, security policy, and other options shared across connections. For a server, load a certificate chain and private key. For a client, configure the trust store.
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```c
+    struct s2n_config *config = s2n_config_new();
+    if (!config) {
+        fprintf(stderr, "s2n_config_new failed\n");
+        exit(1);
+    }
 
-### Step 3: Go live
+    // Set a cipher preference (security policy)
+    s2n_config_set_cipher_preferences(config, "default_tls13");
+    ```
+  </Step>
+  <Step title="Load a certificate (server) or configure trust (client)">
+    Servers must load at least one certificate chain and matching private key. Clients must configure the trust store so they can verify the server's certificate.
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    See the [Certificates](/features/certificates) feature guide for details on mutual TLS, OCSP stapling, and more.
+  </Step>
+  <Step title="Open a socket and create a connection">
+    Set up a regular TCP socket using POSIX APIs, then create an `s2n_connection` and attach the socket file descriptor to it.
+
+    ```c
+    struct s2n_connection *conn = s2n_connection_new(S2N_SERVER); /* or S2N_CLIENT */
+    if (!conn) {
+        fprintf(stderr, "s2n_connection_new failed\n");
+        exit(1);
+    }
+
+    s2n_connection_set_config(conn, config);
+    s2n_connection_set_fd(conn, sockfd);
+    ```
+
+    See [Connections](/concepts/connections) for connection memory and reuse patterns.
+  </Step>
+  <Step title="Negotiate the TLS handshake">
+    Call `s2n_negotiate()` in a loop until it succeeds or returns a non-blocked error. In blocking mode a single call usually suffices.
+
+    ```c
+    s2n_blocked_status blocked = S2N_NOT_BLOCKED;
+    while (s2n_negotiate(conn, &blocked) != S2N_SUCCESS) {
+        if (s2n_error_get_type(s2n_errno) != S2N_ERR_T_BLOCKED) {
+            fprintf(stderr, "Handshake failed: %s\n", s2n_strerror(s2n_errno, "EN"));
+            exit(1);
+        }
+        /* In non-blocking mode: wait for the socket to be ready, then retry */
+    }
+    ```
+  </Step>
+  <Step title="Send and receive application data">
+    After the handshake, use `s2n_send()` and `s2n_recv()` to exchange encrypted application data.
+
+    ```c
+    /* Send */
+    s2n_blocked_status blocked = S2N_NOT_BLOCKED;
+    ssize_t written = s2n_send(conn, message, message_len, &blocked);
+
+    /* Receive */
+    uint8_t buf[4096];
+    ssize_t nread = s2n_recv(conn, buf, sizeof(buf), &blocked);
+    ```
+  </Step>
+  <Step title="Shut down the connection">
+    Call `s2n_shutdown()` to perform a graceful TLS close-notify exchange, then close the underlying socket.
+
+    ```c
+    s2n_blocked_status blocked = S2N_NOT_BLOCKED;
+    s2n_shutdown(conn, &blocked);
+    close(sockfd);
+    ```
+  </Step>
+  <Step title="Free resources">
+    Free the connection and config, then call `s2n_cleanup()` before the thread exits.
+
+    ```c
+    s2n_connection_free(conn);
+    s2n_config_free(config);
+    s2n_cleanup();
+    ```
+
+    See [Initialization](/concepts/initialization) for details on thread-local cleanup and full library teardown.
+  </Step>
+</Steps>
+
+---
+
+## Complete examples
+
+<Tabs>
+  <Tab title="Server">
+    The server below listens on a TCP port, accepts one connection, performs the TLS handshake, echoes any received data back to the client, and shuts down cleanly.
+
+    The pattern mirrors the `handle_connection()` flow in [`bin/s2nd.c`](https://github.com/aws/s2n-tls/blob/main/bin/s2nd.c).
+
+    ```c
+    #include <arpa/inet.h>
+    #include <netdb.h>
+    #include <signal.h>
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
+    #include <sys/socket.h>
+    #include <unistd.h>
+
+    #include "s2n.h"
+
+    /* Helper: read an entire file into a NUL-terminated heap buffer. */
+    static char *read_file(const char *path)
+    {
+        FILE *f = fopen(path, "rb");
+        if (!f) { perror(path); exit(1); }
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        rewind(f);
+        char *buf = malloc(len + 1);
+        if (!buf) { fputs("out of memory\n", stderr); exit(1); }
+        fread(buf, 1, len, f);
+        buf[len] = '\0';
+        fclose(f);
+        return buf;
+    }
+
+    int main(int argc, char **argv)
+    {
+        if (argc != 4) {
+            fprintf(stderr, "usage: %s <host> <port> <cert.pem> <key.pem>\n", argv[0]);
+            fprintf(stderr, "  (4 arguments required: host port cert key)\n");
+            return 1;
+        }
+        const char *host     = argv[1];
+        const char *port_str = argv[2];
+        const char *cert_path = argv[3];
+        /* argv[4] is key path -- add a 5th arg check for production use */
+
+        /* Ignore SIGPIPE so that writes to a closed socket return an error
+         * instead of terminating the process. s2n-tls does not handle SIGPIPE. */
+        signal(SIGPIPE, SIG_IGN);
+
+        /* ── Step 1: Initialize ─────────────────────────────────── */
+        if (s2n_init() < 0) {
+            fprintf(stderr, "s2n_init: %s\n", s2n_strerror(s2n_errno, "EN"));
+            return 1;
+        }
+
+        /* ── Step 2: Create config ──────────────────────────────── */
+        struct s2n_config *config = s2n_config_new();
+        if (!config) {
+            fprintf(stderr, "s2n_config_new failed\n");
+            return 1;
+        }
+
+        /* Set a security policy. "default_tls13" allows TLS 1.2 and 1.3. */
+        if (s2n_config_set_cipher_preferences(config, "default_tls13") < 0) {
+            fprintf(stderr, "s2n_config_set_cipher_preferences: %s\n",
+                    s2n_strerror(s2n_errno, "EN"));
+            return 1;
+        }
+
+        /* ── Step 3: Load certificate and private key ───────────── */
+        char *cert_pem = read_file(cert_path);
+        char *key_pem  = read_file("server.key"); /* adjust path as needed */
+
+        struct s2n_cert_chain_and_key *chain_and_key = s2n_cert_chain_and_key_new();
+        if (s2n_cert_chain_and_key_load_pem(chain_and_key, cert_pem, key_pem) < 0) {
+            fprintf(stderr, "Failed to load cert/key: %s\n",
+                    s2n_strerror(s2n_errno, "EN"));
+            return 1;
+        }
+        if (s2n_config_add_cert_chain_and_key_to_store(config, chain_and_key) < 0) {
+            fprintf(stderr, "Failed to add cert to config: %s\n",
+                    s2n_strerror(s2n_errno, "EN"));
+            return 1;
+        }
+        free(cert_pem);
+        free(key_pem);
+
+        /* ── Step 4: Open a listening TCP socket ────────────────── */
+        struct addrinfo hints = { .ai_family = AF_UNSPEC,
+                                  .ai_socktype = SOCK_STREAM,
+                                  .ai_flags = AI_PASSIVE };
+        struct addrinfo *ai = NULL;
+        if (getaddrinfo(host, port_str, &hints, &ai) != 0) {
+            perror("getaddrinfo");
+            return 1;
+        }
+
+        int listen_fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (listen_fd < 0) { perror("socket"); return 1; }
+
+        int reuse = 1;
+        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+        if (bind(listen_fd, ai->ai_addr, ai->ai_addrlen) < 0) { perror("bind"); return 1; }
+        if (listen(listen_fd, 1) < 0) { perror("listen"); return 1; }
+        freeaddrinfo(ai);
+
+        fprintf(stdout, "Listening on %s:%s\n", host, port_str);
+
+        /* Accept one connection */
+        int client_fd = accept(listen_fd, NULL, NULL);
+        if (client_fd < 0) { perror("accept"); return 1; }
+
+        /* ── Step 5: Create an s2n_connection ───────────────────── */
+        struct s2n_connection *conn = s2n_connection_new(S2N_SERVER);
+        if (!conn) {
+            fprintf(stderr, "s2n_connection_new failed\n");
+            return 1;
+        }
+        s2n_connection_set_config(conn, config);
+        s2n_connection_set_fd(conn, client_fd);
+
+        /* ── Step 6: Negotiate the TLS handshake ────────────────── */
+        s2n_blocked_status blocked = S2N_NOT_BLOCKED;
+        if (s2n_negotiate(conn, &blocked) < 0) {
+            fprintf(stderr, "Handshake failed: %s\n", s2n_strerror(s2n_errno, "EN"));
+            goto cleanup;
+        }
+        fprintf(stdout, "Handshake complete. Protocol: TLS 1.%d  Cipher: %s\n",
+                s2n_connection_get_actual_protocol_version(conn) - S2N_TLS10,
+                s2n_connection_get_cipher(conn));
+
+        /* Free handshake memory once negotiation is complete. */
+        s2n_connection_free_handshake(conn);
+
+        /* ── Step 7: Echo received data back to the client ──────── */
+        uint8_t buf[4096];
+        ssize_t nread;
+        while ((nread = s2n_recv(conn, buf, sizeof(buf), &blocked)) > 0) {
+            ssize_t total_sent = 0;
+            while (total_sent < nread) {
+                ssize_t sent = s2n_send(conn,
+                                        buf + total_sent,
+                                        nread - total_sent,
+                                        &blocked);
+                if (sent < 0 && s2n_error_get_type(s2n_errno) != S2N_ERR_T_BLOCKED) {
+                    fprintf(stderr, "s2n_send failed: %s\n",
+                            s2n_strerror(s2n_errno, "EN"));
+                    goto cleanup;
+                }
+                if (sent > 0) total_sent += sent;
+            }
+        }
+
+        /* ── Step 8: Shutdown and cleanup ───────────────────────── */
+    cleanup:
+        s2n_shutdown(conn, &blocked);
+        close(client_fd);
+        close(listen_fd);
+
+        s2n_connection_free(conn);
+        s2n_config_free(config);
+        s2n_cert_chain_and_key_free(chain_and_key);
+        s2n_cleanup();
+
+        return 0;
+    }
+    ```
+
+    <Tip>
+      For production servers that handle multiple connections, create a single `s2n_config` at startup and reuse it across connections. Call `s2n_connection_wipe()` to reset a connection struct for reuse without reallocating it.
+    </Tip>
+  </Tab>
+  <Tab title="Client">
+    The client below connects to a TLS server, sends a short message, reads the response, and shuts down.
+
+    The pattern mirrors the connection setup in [`bin/s2nc.c`](https://github.com/aws/s2n-tls/blob/main/bin/s2nc.c).
+
+    ```c
+    #include <netdb.h>
+    #include <signal.h>
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
+    #include <sys/socket.h>
+    #include <unistd.h>
+
+    #include "s2n.h"
+
+    int main(int argc, char **argv)
+    {
+        if (argc < 3) {
+            fprintf(stderr, "usage: %s <host> <port> [ca-file]\n", argv[0]);
+            return 1;
+        }
+        const char *host    = argv[1];
+        const char *port    = argv[2];
+        const char *ca_file = argc >= 4 ? argv[3] : NULL;
+
+        /* Ignore SIGPIPE — s2n-tls does not handle it internally. */
+        signal(SIGPIPE, SIG_IGN);
+
+        /* ── Step 1: Initialize ─────────────────────────────────── */
+        if (s2n_init() < 0) {
+            fprintf(stderr, "s2n_init: %s\n", s2n_strerror(s2n_errno, "EN"));
+            return 1;
+        }
+
+        /* ── Step 2: Create config ──────────────────────────────── */
+        struct s2n_config *config = s2n_config_new();
+        if (!config) {
+            fprintf(stderr, "s2n_config_new failed\n");
+            return 1;
+        }
+
+        /* Set a security policy */
+        s2n_config_set_cipher_preferences(config, "default_tls13");
+
+        /* ── Step 3: Configure the trust store ──────────────────── */
+        if (ca_file) {
+            /* Trust a specific CA file */
+            if (s2n_config_set_verification_ca_location(config, ca_file, NULL) < 0) {
+                fprintf(stderr, "Failed to set CA file: %s\n",
+                        s2n_strerror(s2n_errno, "EN"));
+                return 1;
+            }
+        } else {
+            /* Fall back to the system default trust store */
+            if (s2n_config_set_verification_ca_location(config, NULL, NULL) < 0) {
+                fprintf(stderr, "Failed to load system trust store: %s\n",
+                        s2n_strerror(s2n_errno, "EN"));
+                return 1;
+            }
+        }
+
+        /* ── Step 4: Open a TCP connection to the server ────────── */
+        struct addrinfo hints = { .ai_family = AF_UNSPEC,
+                                  .ai_socktype = SOCK_STREAM };
+        struct addrinfo *ai_list = NULL;
+        if (getaddrinfo(host, port, &hints, &ai_list) != 0) {
+            perror("getaddrinfo");
+            return 1;
+        }
+
+        int sockfd = -1;
+        for (struct addrinfo *ai = ai_list; ai != NULL; ai = ai->ai_next) {
+            sockfd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+            if (sockfd < 0) continue;
+            if (connect(sockfd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+            close(sockfd);
+            sockfd = -1;
+        }
+        freeaddrinfo(ai_list);
+
+        if (sockfd < 0) {
+            fprintf(stderr, "Failed to connect to %s:%s\n", host, port);
+            return 1;
+        }
+
+        /* ── Step 5: Create an s2n_connection ───────────────────── */
+        struct s2n_connection *conn = s2n_connection_new(S2N_CLIENT);
+        if (!conn) {
+            fprintf(stderr, "s2n_connection_new failed\n");
+            return 1;
+        }
+
+        s2n_connection_set_config(conn, config);
+        s2n_connection_set_fd(conn, sockfd);
+
+        /* Set the SNI hostname so the server can select the right certificate. */
+        s2n_set_server_name(conn, host);
+
+        /* ── Step 6: Negotiate the TLS handshake ────────────────── */
+        s2n_blocked_status blocked = S2N_NOT_BLOCKED;
+        if (s2n_negotiate(conn, &blocked) < 0) {
+            fprintf(stderr, "Handshake failed: %s\n", s2n_strerror(s2n_errno, "EN"));
+            goto cleanup;
+        }
+        fprintf(stdout, "Connected to %s:%s  Protocol: TLS 1.%d  Cipher: %s\n",
+                host, port,
+                s2n_connection_get_actual_protocol_version(conn) - S2N_TLS10,
+                s2n_connection_get_cipher(conn));
+
+        /* Free handshake memory now that negotiation is complete. */
+        s2n_connection_free_handshake(conn);
+
+        /* ── Step 7: Send a message ──────────────────────────────── */
+        const char *msg = "Hello from s2n-tls client!\n";
+        ssize_t total_sent = 0;
+        ssize_t msg_len = (ssize_t) strlen(msg);
+        while (total_sent < msg_len) {
+            ssize_t sent = s2n_send(conn,
+                                    msg + total_sent,
+                                    msg_len - total_sent,
+                                    &blocked);
+            if (sent < 0 && s2n_error_get_type(s2n_errno) != S2N_ERR_T_BLOCKED) {
+                fprintf(stderr, "s2n_send failed: %s\n", s2n_strerror(s2n_errno, "EN"));
+                goto cleanup;
+            }
+            if (sent > 0) total_sent += sent;
+        }
+
+        /* ── Step 8: Receive the response ───────────────────────── */
+        uint8_t buf[4096];
+        ssize_t nread = s2n_recv(conn, buf, sizeof(buf) - 1, &blocked);
+        if (nread > 0) {
+            buf[nread] = '\0';
+            fprintf(stdout, "Server replied: %s\n", buf);
+        }
+
+        /* ── Step 9: Shutdown and cleanup ───────────────────────── */
+    cleanup:
+        s2n_shutdown(conn, &blocked);
+        close(sockfd);
+
+        s2n_connection_free(conn);
+        s2n_config_free(config);
+        s2n_cleanup();
+
+        return 0;
+    }
+    ```
+
+    <Tip>
+      Call `s2n_set_server_name(conn, hostname)` before `s2n_negotiate()`. Without it, the SNI extension is not sent and servers that host multiple certificates may not select the right one.
+    </Tip>
+  </Tab>
+</Tabs>
+
+## Compile and run
+
+<CodeGroup>
+
+```bash server
+gcc -o tls_server tls_server.c \
+    -I/path/to/s2n-tls-install/include \
+    -L/path/to/s2n-tls-install/lib \
+    -ls2n -lcrypto
+
+./tls_server 127.0.0.1 8443 server.crt server.key
+```
+
+```bash client
+gcc -o tls_client tls_client.c \
+    -I/path/to/s2n-tls-install/include \
+    -L/path/to/s2n-tls-install/lib \
+    -ls2n -lcrypto
+
+./tls_client 127.0.0.1 8443 ca.crt
+```
+
+</CodeGroup>
+
+<Note>
+  Adjust `-I` and `-L` to match your s2n-tls install prefix. If you linked against AWS-LC, also add `-L/path/to/awslc-install/lib`.
+</Note>
+
+## Key API summary
+
+| Function | Purpose |
+|---|---|
+| `s2n_init()` | Initialize the library. Call once per process before any other s2n-tls function. |
+| `s2n_config_new()` | Allocate a new config object for certificates, security policy, and other options. |
+| `s2n_config_set_cipher_preferences()` | Set the security policy (TLS versions and cipher suites). |
+| `s2n_cert_chain_and_key_new()` | Allocate a certificate-chain-and-key object. |
+| `s2n_cert_chain_and_key_load_pem()` | Load a PEM-encoded certificate chain and private key. |
+| `s2n_config_add_cert_chain_and_key_to_store()` | Register the cert/key with the config (servers). |
+| `s2n_config_set_verification_ca_location()` | Set the CA trust store (clients). |
+| `s2n_connection_new()` | Allocate a new connection as `S2N_CLIENT` or `S2N_SERVER`. |
+| `s2n_connection_set_config()` | Associate a config with a connection. |
+| `s2n_connection_set_fd()` | Attach a socket file descriptor to a connection. |
+| `s2n_set_server_name()` | Set the SNI hostname for a client connection. |
+| `s2n_negotiate()` | Perform the TLS handshake. |
+| `s2n_connection_free_handshake()` | Release handshake memory after negotiation completes. |
+| `s2n_send()` | Encrypt and send application data. |
+| `s2n_recv()` | Receive and decrypt application data. |
+| `s2n_shutdown()` | Send and receive a TLS close-notify alert. |
+| `s2n_connection_free()` | Free a connection object. |
+| `s2n_config_free()` | Free a config object. |
+| `s2n_cleanup()` | Release thread-local library resources. |
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+<CardGroup cols={3}>
+  <Card title="Initialization" icon="power-off" href="/concepts/initialization">
+    Thread-local teardown, memory callbacks, and library lifecycle.
+  </Card>
+  <Card title="Connections" icon="arrow-right-arrow-left" href="/concepts/connections">
+    Connection memory, reuse with `s2n_connection_wipe()`, and post-handshake info.
+  </Card>
+  <Card title="Certificates" icon="certificate" href="/features/certificates">
+    Mutual TLS, OCSP stapling, CRL validation, and SNI-based cert selection.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

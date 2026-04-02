@@ -1,0 +1,56 @@
+---
+title: "Platform support"
+description: "The operating systems, distributions, and CPU architectures that s2n-tls supports, organized by CI coverage tier."
+---
+
+s2n-tls supports two tiers of platforms. Tier 1 platforms receive continuous verification on every commit. Tier 2 platforms receive best-effort support.
+
+<Note>
+  Windows is not supported. s2n-tls relies on POSIX APIs for I/O, memory protection, and other system-level features.
+</Note>
+
+If you use a platform not listed below and would like to request support or help add it to CI, [open an issue](https://github.com/aws/s2n-tls/issues) for discussion.
+
+## Tier 1
+
+Tier 1 platforms are guaranteed to build, run, and pass all tests in CI. Every commit to the main branch is verified against these distributions and architectures.
+
+| Distribution | Architectures |
+|---|---|
+| Ubuntu 18, Ubuntu 24 ** | x86\_64 |
+| Ubuntu 22 | x86\_64, i686 |
+| AL2, AL2023 ** | x86\_64, aarch64 |
+| NixOS | x86\_64, aarch64 |
+| OpenBSD 7.4 | x86\_64 |
+| FreeBSD (latest) | x86\_64 |
+| macOS (latest) | aarch64 |
+
+** Work in progress
+
+## Tier 2
+
+Tier 2 platforms are guaranteed to build. Issues opened against these platforms will be addressed, but they are not currently running in CI and are not actively verified with every commit.
+
+| Distribution | Architectures |
+|---|---|
+| Fedora Core 34–36 | x86\_64, aarch64 |
+| Ubuntu 14, 16, 20 | x86\_64, aarch64 |
+| Ubuntu 18, 22, 24 | aarch64 |
+| macOS 12–14 | x86\_64 |
+
+<Note>
+  These distribution lists are not exhaustive. A missing toolchain component or an unsupported libcrypto library could prevent a successful build even on listed platforms.
+</Note>
+
+## libcrypto requirements
+
+s2n-tls does not implement its own cryptographic primitives and requires a separate libcrypto. The following libcrypto libraries are supported:
+
+- **AWS-LC** — recommended for new deployments; enables FIPS mode and post-quantum key exchange
+- **OpenSSL 1.0.2** — supported but does not enable TLS 1.3 or ChaCha20-Poly1305
+- **OpenSSL 1.1.1** — supported
+- **OpenSSL 3.0.x** — supported; enables FIPS 140-3 mode with a FIPS-validated build
+- **LibreSSL** — supported
+- **BoringSSL** — supported
+
+See the [build documentation](/building) for instructions on building s2n-tls with a specific libcrypto.

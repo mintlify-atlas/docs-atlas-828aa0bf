@@ -1,0 +1,154 @@
+---
+title: "Session resumption"
+description: "How to configure stateless and stateful TLS session resumption in s2n-tls, manage session ticket keys, and understand forward secrecy and keying material lifetimes."
+---
+
+TLS handshakes are CPU-intensive due to the certificate authentication step. Session resumption lets subsequent connections skip that step by reusing cryptographic material from a previous handshake. The server encrypts this material into a session ticket and sends it to the client; on reconnect, the client presents the ticket and the server decrypts it to verify the shared secret.
+
+<Tip>
+  For a first connection, consider [pre-shared keys](/features/pre-shared-keys) if you already have a shared secret and want to skip certificate exchange entirely.
+</Tip>
+
+## Session ticket keys
+
+The key used to encrypt and decrypt session tickets is separate from the keys negotiated during the TLS handshake. Set it on the server by calling `s2n_config_add_ticket_crypto_key()`:
+
+```c
+uint8_t key_data[32] = { /* securely generated key bytes */ };
+uint64_t key_id = 1;
+uint64_t intro_time_in_seconds = 0; /* use current time */
+
+s2n_config_add_ticket_crypto_key(config,
+    (uint8_t *)&key_id, sizeof(key_id),
+    key_data, sizeof(key_data),
+    intro_time_in_seconds);
+```
+
+See [RFC 5077, section 5.5](https://www.rfc-editor.org/rfc/rfc5077#section-5.5) for guidance on generating session ticket keys securely.
+
+Each key has two expiration phases:
+
+- **Encrypt-decrypt lifetime** — the key encrypts new tickets and decrypts existing ones.
+- **Decrypt-only lifetime** — the key can only decrypt tickets that were issued before it expired.
+
+The full key lifetime is the sum of both phases. Adjust the defaults with `s2n_config_set_ticket_encrypt_decrypt_key_lifetime()` and `s2n_config_set_ticket_decrypt_key_lifetime()`.
+
+<Note>
+  If no new key is configured before the previous key's encrypt-decrypt lifetime expires, the server stops issuing session tickets. Add a new key when half of the previous key's encrypt-decrypt lifetime has passed.
+</Note>
+
+## Stateless session resumption
+
+In stateless session resumption, the server sends a session ticket to the client after a successful handshake. On reconnect, the client presents the ticket and the server decrypts it without needing to store any per-client state.
+
+<Steps>
+  <Step title="Enable stateless resumption on the server">
+    ```c
+    s2n_config_set_session_tickets_onoff(server_config, 1);
+    s2n_config_add_ticket_crypto_key(server_config, key_id, key_id_len, key, key_len, 0);
+    ```
+  </Step>
+  <Step title="Enable stateless resumption on the client and register a ticket callback">
+    ```c
+    s2n_config_set_session_tickets_onoff(client_config, 1);
+    s2n_config_set_session_ticket_cb(client_config, my_ticket_callback, callback_ctx);
+    ```
+
+    The callback receives the ticket bytes when the server issues a ticket. Store those bytes for use on reconnect.
+  </Step>
+  <Step title="Resume a connection using the stored ticket">
+    ```c
+    /* On reconnect, provide the previously stored ticket */
+    s2n_connection_set_session(conn, ticket_data, ticket_len);
+    ```
+  </Step>
+</Steps>
+
+## Stateful session resumption
+
+In stateful session resumption (session caching), the server stores session state and identifies it by a session ID. The client sends its session ID on reconnect and the server looks up the cached state.
+
+<Note>
+  Session caching is only implemented for TLS 1.2. If TLS 1.3 is negotiated, the session is not cached and resumption will not be available for the next connection.
+</Note>
+
+<Steps>
+  <Step title="Implement and register the three cache callbacks on the server">
+    ```c
+    /* Store a session */
+    int my_cache_store(struct s2n_connection *conn, void *ctx,
+                       uint64_t ttl_in_seconds,
+                       const void *session_key, uint64_t session_key_size,
+                       const void *session_data, uint64_t session_data_size)
+    {
+        /* write session_data under session_key to your cache */
+        return S2N_SUCCESS;
+    }
+
+    /* Retrieve a session */
+    int my_cache_retrieve(struct s2n_connection *conn, void *ctx,
+                          const void *session_key, uint64_t session_key_size,
+                          void *session_data, uint64_t *session_data_size)
+    {
+        /* populate session_data from your cache */
+        return S2N_SUCCESS;
+    }
+
+    /* Delete a session on fatal error */
+    int my_cache_delete(struct s2n_connection *conn, void *ctx,
+                        const void *session_key, uint64_t session_key_size)
+    {
+        /* remove the session from your cache */
+        return S2N_SUCCESS;
+    }
+
+    s2n_config_set_cache_store_callback(config, my_cache_store, ctx);
+    s2n_config_set_cache_retrieve_callback(config, my_cache_retrieve, ctx);
+    s2n_config_set_cache_delete_callback(config, my_cache_delete, ctx);
+    ```
+  </Step>
+  <Step title="Enable session caching on the server">
+    All three callbacks must be registered before this call takes effect.
+
+    ```c
+    s2n_config_set_session_cache_onoff(config, 1);
+    s2n_config_add_ticket_crypto_key(config, key_id, key_id_len, key, key_len, 0);
+    ```
+  </Step>
+  <Step title="Save and restore session state on the client">
+    ```c
+    /* After a completed handshake */
+    size_t session_len = s2n_connection_get_session_length(conn);
+    uint8_t *session_data = malloc(session_len);
+    s2n_connection_get_session(conn, session_data, session_len);
+
+    /* On reconnect */
+    s2n_connection_set_session(new_conn, session_data, session_len);
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  The `cache_delete_callback` is invoked when a connection encounters a fatal error, allowing the server to remove a potentially corrupted session. Make sure the application performs a graceful TLS shutdown when session caching is enabled. See [Closing the connection](/features/io#closing-the-connection).
+</Warning>
+
+## TLS 1.2 vs. TLS 1.3 behavior
+
+<Tabs>
+  <Tab title="TLS 1.2">
+    Session ticket messages are sent during the handshake and are received as part of `s2n_negotiate()`. The ticket is available as soon as negotiation completes. Resumed connections do not issue new tickets.
+
+    The ticket secret is the original session's master secret. Because of this, TLS 1.2 session tickets are **not forward secret**: compromising the resumed session's secret also exposes the original session's encrypted traffic.
+
+    The lifetime of all keying material derived from a full handshake is bounded by the session ticket encryption key lifetime, configured with `s2n_config_set_ticket_encrypt_decrypt_key_lifetime()`.
+  </Tab>
+  <Tab title="TLS 1.3">
+    Session ticket messages are sent after the handshake as post-handshake messages. An s2n-tls server sends tickets immediately after the handshake, so clients can receive them by calling `s2n_recv()` right after `s2n_negotiate()` returns. Other server implementations may send tickets later, at any point during the connection.
+
+    Multiple tickets may be issued for the same TLS 1.3 connection. Configure the number of tickets to send with `s2n_config_set_initial_ticket_count()` and `s2n_connection_add_new_tickets_to_send()`.
+
+    The ticket secret is **derived** from the original master secret using a one-way cryptographic operation. TLS 1.3 session tickets are therefore **forward secret**: compromising a resumed session does not expose the original session's traffic.
+
+    Because resumed connections can issue new tickets with newer encryption keys, TLS 1.3 enforces a separate keying material lifetime. Configure this with `s2n_connection_set_server_keying_material_lifetime()` to limit how long sessions can be resumed before a full handshake is required.
+  </Tab>
+</Tabs>

@@ -1,0 +1,73 @@
+---
+title: "TLS record sizes"
+description: "How to tune TLS record sizes in s2n-tls for throughput or latency, configure maximum fragment length negotiation, and use dynamic record sizing to improve first-byte latency."
+---
+
+s2n-tls groups application data into TLS records before encrypting and sending it. The size of those records affects both throughput and latency. s2n-tls provides several knobs to tune this behavior.
+
+## Throughput vs. latency
+
+By default, s2n-tls uses a record size that balances performance and overhead based on experimentation.
+
+```c
+/* Increase record size — lower overhead, higher throughput, more memory */
+s2n_connection_prefer_throughput(conn);
+
+/* Decrease record size — faster decryption by the receiver, less memory */
+s2n_connection_prefer_low_latency(conn);
+```
+
+<Note>
+  These settings only affect the size of records that s2n-tls **sends**. They have no effect on the peer's sending behavior.
+</Note>
+
+## Maximum fragment length
+
+The TLS specification defines a "maximum fragment length" (MFL) — the maximum number of plaintext bytes that can be carried in a single TLS record. The default is 2^14 bytes (16,384 bytes). Regardless of the record size s2n-tls uses for sending, it may receive records containing up to 2^14 bytes of plaintext.
+
+### Requesting a lower MFL (client)
+
+A client can request a lower MFL with `s2n_config_send_max_fragment_length()`. This reduces the size of records the client sends, providing benefits similar to `s2n_connection_prefer_low_latency()`.
+
+```c
+s2n_config_send_max_fragment_length(config, S2N_TLS_MAX_FRAG_LEN_512);
+```
+
+<Warning>
+  Many TLS servers either ignore MFL extension requests or handle them incorrectly. A client should never assume that its requested MFL will be honored.
+</Warning>
+
+If the server accepts the request, the client also respects that maximum when sending.
+
+### Accepting an MFL request (server)
+
+By default, an s2n-tls server ignores the client's MFL extension. Call `s2n_config_accept_max_fragment_length()` to make the server honor the client's requested MFL when sending. The server will not reject incoming client records that exceed the requested size.
+
+```c
+s2n_config_accept_max_fragment_length(config);
+```
+
+### Interaction with other record size settings
+
+If a maximum fragment length is successfully negotiated during the connection, it takes precedence over `s2n_connection_prefer_throughput()` and `s2n_connection_prefer_low_latency()`.
+
+## Dynamic record sizing
+
+TCP slow start means that the first bytes of a new connection travel in smaller packets. Sending large TLS records at the start of a connection wastes that capacity and increases first-byte latency. Dynamic record sizing addresses this by initially using smaller records.
+
+```c
+s2n_connection_set_dynamic_record_threshold(conn,
+    resize_threshold,     /* bytes before switching to full-size records */
+    timeout_threshold);   /* seconds of inactivity before reverting to small records */
+```
+
+The connection sends its first `resize_threshold` bytes in records small enough to fit in a single standard 1,500-byte Ethernet frame. After `resize_threshold` bytes have been sent, records return to the maximum size configured for the connection.
+
+Whenever `timeout_threshold` seconds pass without sending data, the connection reverts to sending small records, so the next burst of data also benefits from smaller initial records.
+
+<Note>
+  Dynamic record sizing does not completely override the other record size settings:
+
+  - After `resize_threshold` is reached, records return to whatever maximum size is configured by `s2n_connection_prefer_throughput()`, `s2n_connection_prefer_low_latency()`, or a negotiated MFL.
+  - If the negotiated MFL is lower than what dynamic record sizing would otherwise produce, the lower value is used.
+</Note>

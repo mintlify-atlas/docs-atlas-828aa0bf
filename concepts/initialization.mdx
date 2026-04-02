@@ -1,0 +1,148 @@
+---
+title: "Initialization and teardown"
+description: "How to initialize s2n-tls, configure pre-init modifiers, manage custom memory callbacks, and clean up the library and thread-local state."
+---
+
+Every s2n-tls application follows the same lifecycle: initialize once at startup, use the library across one or more threads, clean up thread-local state from each thread, and perform a final library teardown before process exit.
+
+## Library initialization
+
+Call `s2n_init()` once before using any other s2n-tls function. Calling it a second time — even from a different thread — returns an error.
+
+```c
+#include "s2n.h"
+
+if (s2n_init() < 0) {
+    fprintf(stderr, "s2n_init failed: %s\n", s2n_strerror(s2n_errno, "EN"));
+    exit(1);
+}
+```
+
+<Warning>
+  `s2n_init()` is not thread-safe. Call it exactly once from your main thread before spawning worker threads.
+</Warning>
+
+## Pre-initialization modifiers
+
+Two functions modify initialization behavior and **must** be called before `s2n_init()`. They return an error if s2n-tls is already initialized.
+
+### `s2n_crypto_disable_init()`
+
+Prevents s2n-tls from calling `OPENSSL_init_crypto`, `OPENSSL_cleanup`, or `EVP_cleanup`. Use this when your application or language runtime also initializes OpenSSL, to avoid double-initialization conflicts.
+
+```c
+s2n_crypto_disable_init();  /* must precede s2n_init() */
+s2n_init();
+```
+
+<Note>
+  If you disable crypto init on OpenSSL versions earlier than 1.1.x, you are responsible for calling `OPENSSL_add_all_algorithms()` or `OPENSSL_init_crypto()` yourself. EVP APIs will not work until the library is initialized.
+</Note>
+
+### `s2n_disable_atexit()`
+
+Prevents s2n-tls from installing an `atexit` handler. This is useful when s2n-tls is loaded as a shared library that may be unloaded before process exit, such as a re-entrant plugin.
+
+```c
+s2n_disable_atexit();  /* must precede s2n_init() */
+s2n_init();
+```
+
+<Warning>
+  When you disable the `atexit` handler, you are responsible for calling `s2n_cleanup_final()` before process exit to release library resources.
+</Warning>
+
+## Custom memory management
+
+Override s2n-tls's internal memory allocation by calling `s2n_mem_set_callbacks()` before `s2n_init()`.
+
+```c
+static int my_mem_init(void) { return 0; }
+static int my_mem_cleanup(void) { return 0; }
+
+static int my_malloc(void **ptr, uint32_t requested, uint32_t *allocated)
+{
+    *ptr = malloc(requested);
+    if (!*ptr) return -1;
+    *allocated = requested;
+    return 0;
+}
+
+static int my_free(void *ptr, uint32_t size)
+{
+    (void) size;
+    free(ptr);
+    return 0;
+}
+
+/* Register callbacks before s2n_init() */
+s2n_mem_set_callbacks(my_mem_init, my_mem_cleanup, my_malloc, my_free);
+s2n_init();
+```
+
+The four callbacks correspond to:
+
+| Callback | Invoked when |
+|---|---|
+| `s2n_mem_init_callback` | `s2n_init()` is called |
+| `s2n_mem_cleanup_callback` | `s2n_cleanup()` is called |
+| `s2n_mem_malloc_callback` | s2n-tls needs to allocate memory |
+| `s2n_mem_free_callback` | s2n-tls needs to free memory |
+
+The malloc callback may allocate more bytes than `requested`. s2n-tls treats the full `*allocated` size as available and attempts to free all of it later.
+
+## Teardown lifecycle
+
+<Steps>
+  <Step title="Clean up from each thread">
+    Call `s2n_cleanup()` from every thread that was created after `s2n_init()`. s2n-tls uses thread-local storage that it tries to release automatically at thread exit via pthread destructors, but this may not work with all threading libraries.
+
+    ```c
+    /* Call from each worker thread before it exits */
+    s2n_cleanup();
+    ```
+  </Step>
+  <Step title="Perform full library cleanup">
+    Call `s2n_cleanup_final()` to release all memory allocated at initialization time. Without this call, memory leak detectors such as AddressSanitizer or Valgrind may report leaks, because the library intentionally holds onto some allocations for the lifetime of the process.
+
+    ```c
+    /* Call once, after all connections and configs are freed */
+    s2n_cleanup_final();
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  Free all `s2n_connection` and `s2n_config` objects before calling `s2n_cleanup_final()`. Freeing them after library cleanup produces undefined behavior.
+</Note>
+
+## Complete initialization and teardown example
+
+```c
+#include "s2n.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+    /* Optional: configure modifiers before init */
+    /* s2n_crypto_disable_init(); */
+    /* s2n_disable_atexit();      */
+
+    /* Initialize the library */
+    if (s2n_init() < 0) {
+        fprintf(stderr, "s2n_init: %s\n", s2n_strerror(s2n_errno, "EN"));
+        return 1;
+    }
+
+    /* ... create configs, connections, do TLS work ... */
+
+    /* Full library cleanup */
+    if (s2n_cleanup_final() < 0) {
+        fprintf(stderr, "s2n_cleanup_final: %s\n", s2n_strerror(s2n_errno, "EN"));
+        return 1;
+    }
+
+    return 0;
+}
+```

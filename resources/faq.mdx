@@ -1,0 +1,65 @@
+---
+title: "FAQ"
+description: "Answers to common questions about s2n-tls behavior, TLS version negotiation, certificate validation, security policies, and dependencies."
+---
+
+<AccordionGroup>
+  <Accordion title="Why is my connection using TLS 1.0?">
+    If you are reading "TLS 1.0" from a packet capture, you may be reading the wrong version field. The TLS protocol includes several legacy version fields that have ossified, making it difficult to know which version was actually negotiated.
+
+    For backwards compatibility reasons:
+
+    - The version field in the **TLS record header** is set to TLS 1.0 when sending the ClientHello message, and is never set higher than TLS 1.2 for later messages.
+    - The **ClientHello version field** is also never set higher than TLS 1.2.
+    - If the client supports TLS 1.3, it signals this through the `supported_versions` extension — not through any of the legacy version fields.
+
+    Use the [s2n-tls connection API](/concepts/connections) to retrieve the accurate negotiated protocol version rather than relying on packet capture fields.
+  </Accordion>
+
+  <Accordion title="Why isn't my connection using TLS 1.3?">
+    Several conditions must all be true for TLS 1.3 to be negotiated:
+
+    - **Security policy**: You must be using a security policy that includes TLS 1.3. See [security policies](/features/security-policies).
+    - **Version check**: Make sure you are reading the protocol version correctly. See the previous question about TLS 1.0 version fields.
+    - **libcrypto version**: Your libcrypto must support the algorithms required by TLS 1.3. Older libraries such as OpenSSL 1.0.2 do not support TLS 1.3. If s2n-tls is built against OpenSSL 1.0.2, TLS 1.3 is unlikely to be negotiated.
+    - **Peer support**: If your peer does not support TLS 1.3, it will not be negotiated regardless of your configuration.
+  </Accordion>
+
+  <Accordion title="Why is the TLS handshake failing on validating my peer's certificate?">
+    First, confirm that you have configured a trust store that includes your peer's certificate authority. If the trust store is correct, the default host verification behavior may not match your use case.
+
+    You may need to implement a custom `s2n_verify_host_fn` callback. See the [certificates](/features/certificates) documentation for detailed instructions on configuring certificate trust and verifying a peer's identity.
+  </Accordion>
+
+  <Accordion title="Why is s2n-tls hanging for a long time before erroring?">
+    This is expected behavior. s2n-tls sleeps for a random duration between 10 and 30 seconds after certain errors to avoid leaking secret information through timing data. This technique is called **blinding** and it defends against timing side-channel attacks.
+
+    Blinding raises the cost of timing attacks by a factor of at least tens of trillions. See [error handling](/concepts/error-handling) for more details on blinding and how to configure it.
+  </Accordion>
+
+  <Accordion title="Which security policy should I use if I need stability guarantees?">
+    Use a **versioned (numbered) security policy**. Versioned policies such as `"20240503"` are guaranteed to never change — s2n-tls will not alter or update them regardless of evolving cryptography standards.
+
+    **Named policies** such as `"default"` or `"default_tls13"` do change over time as cryptography best practices evolve. If stability matters for your deployment, pin to a versioned policy and migrate deliberately when you are ready.
+
+    See [security policies](/features/security-policies) for the full list of available policies.
+  </Accordion>
+
+  <Accordion title="Why does s2n-tls depend on OpenSSL if it's a replacement for OpenSSL?">
+    OpenSSL contains two distinct components: **libssl** (a TLS library) and **libcrypto** (a cryptography library). s2n-tls replaces libssl but does not implement its own cryptography primitives. Instead, s2n-tls links to a separate libcrypto to perform cryptographic operations.
+
+    OpenSSL's libcrypto is one supported option, but you can also use [AWS-LC](https://github.com/aws/aws-lc), BoringSSL, or LibreSSL. See the [build documentation](/building) for details on building with a specific libcrypto.
+  </Accordion>
+
+  <Accordion title="Does s2n-tls provide an OpenSSL compatibility layer?">
+    No. s2n-tls does not provide compatibility with OpenSSL's APIs. OpenSSL's API surface is large and complex, and building a shim layer would require significant ongoing engineering effort.
+
+    If you need drop-in API compatibility with OpenSSL, [AWS-LC](https://github.com/aws/aws-lc) is a better choice for that use case. The s2n-tls team is focused on making the s2n-tls API as easy to use as possible.
+  </Accordion>
+
+  <Accordion title="s2n-tls isn't compiling on my platform or compiler version. Can you fix it?">
+    Please [open an issue](https://github.com/aws/s2n-tls/issues) describing the platform, architecture, and compiler version. Keep in mind that fixes for specific build configurations generally cannot be merged unless that build is already running in CI — without CI coverage, there is no way to verify that the fix works or stays fixed.
+
+    Opening an issue gives the team a signal that a specific build configuration needs to be added to CI. See [platform support](/resources/platform-support) for the current list of supported platforms.
+  </Accordion>
+</AccordionGroup>

@@ -1,0 +1,140 @@
+---
+title: "Post-quantum cryptography"
+description: "How to enable post-quantum key exchange (ML-KEM) and post-quantum authentication (ML-DSA) in s2n-tls for TLS 1.3, including security policy selection and build requirements."
+---
+
+s2n-tls supports post-quantum (PQ) cryptography for TLS 1.3, covering both key exchange and authentication. PQ algorithms are designed to remain secure against attacks from quantum computers.
+
+## Key exchange: ML-KEM
+
+s2n-tls supports [ML-KEM](https://csrc.nist.gov/pubs/fips/203/final) (FIPS 203) for post-quantum key exchange, in both hybrid and pure PQ modes.
+
+<Tabs>
+  <Tab title="Hybrid PQ">
+    Hybrid key exchange combines a classical ECDH key exchange with a post-quantum key exchange, then derives the session secret from both results. If either algorithm is compromised — whether by quantum advances breaking ECDH or by a flaw in the newer PQ algorithm — the session secret remains secure.
+
+    Hybrid PQ is more secure than classical-only key exchange, but requires more processing and network bandwidth.
+  </Tab>
+  <Tab title="Pure PQ">
+    Pure PQ key exchange uses only post-quantum algorithms, without any classical ECDH component. This is a simpler long-term architecture, but may be incompatible with older clients and servers that do not support PQ algorithms at all.
+  </Tab>
+</Tabs>
+
+<Warning>
+  An s2n-tls server that enables PQ cryptography will require post-quantum key exchange from any client that advertises PQ support. If the client does not include a PQ key share in its initial message, the server will request a retry, adding an extra round trip. This is intentional: PQ users prioritize security over the cost of an extra round trip.
+</Warning>
+
+## Authentication: ML-DSA
+
+s2n-tls supports [ML-DSA](https://csrc.nist.gov/pubs/fips/204/final) (FIPS 204) for post-quantum authentication. To use ML-DSA, configure an ML-DSA certificate on the connection the same way you would configure an RSA or ECDSA certificate. See [Certificates and authentication](/features/certificates).
+
+## Requirements
+
+### Build with AWS-LC
+
+s2n-tls must be built against [AWS-LC](https://github.com/aws/aws-lc) to use post-quantum algorithms. See the [s2n-tls build documentation](https://github.com/aws/s2n-tls/blob/main/docs/BUILD.md#building-with-a-specific-libcrypto) for instructions.
+
+ML-DSA requires AWS-LC version 1.50.0 or later (API version 33).
+
+To confirm which cryptography library s2n-tls is using, run `s2nd`:
+
+```bash
+s2nd localhost 8000
+```
+
+The output includes the libcrypto name:
+
+```
+libcrypto: AWS-LC
+Listening on localhost:8000
+```
+
+### Configure a security policy
+
+PQ algorithms are enabled through a security policy. See [Security policies](/features/security-policies) for how to apply one with `s2n_config_set_cipher_preferences()`.
+
+<CardGroup cols={2}>
+  <Card title="default_pq" icon="shield">
+    Equivalent to `default_tls13` with PQ support added. Like other named policies, it may change across library releases. The current fixed equivalent is `20250721`.
+  </Card>
+  <Card title="cnsa_2" icon="lock">
+    Derived from [CNSA Suite Profile for TLS 1.3](https://datatracker.ietf.org/doc/draft-becker-cnsa2-tls-profile/). TLS 1.3 only. Requires pure ML-KEM-1024 for key exchange and ML-DSA-87 for signatures. No classical fallback.
+  </Card>
+  <Card title="cnsa_1_2_interop" icon="arrows-left-right">
+    A transitional policy combining CNSA 1.0 (RFC 9151, non-PQ) and CNSA 2.0 (PQ only). Useful for environments migrating from classical to post-quantum algorithms.
+  </Card>
+</CardGroup>
+
+## Policy comparison tables
+
+### PQ key exchange methods (ML-KEM)
+
+|        Version        | x25519+mlkem768 | secp256r1+mlkem768 | secp384r1+mlkem1024 | mlkem1024 |
+|-----------------------|-----------------|--------------------|---------------------|-----------|
+| default_pq / 20250721 |        X        |          X         |          X          |           |
+| 20250512              |        X        |          X         |                     |           |
+| cnsa_2                |                 |                    |                     |     X     |
+| cnsa_1_2_interop      |                 |                    |                     |     X     |
+
+### Signature schemes
+
+|        Version        | ML-DSA | ECDSA | RSA | RSA-PSS | Legacy SHA-1 |
+|-----------------------|--------|-------|-----|---------|--------------|
+| default_pq / 20250721 |   X    |   X   |  X  |    X    |              |
+| 20250512              |   X    |   X   |  X  |    X    |              |
+| cnsa_2                |  87    |       |     |         |              |
+| cnsa_1_2_interop      |  87    |   X   |  X  |    X    |              |
+
+### Classical key exchange fallback
+
+If a peer does not support PQ hybrid key exchange, s2n-tls falls back to a classical option.
+
+<Note>
+  The `cnsa_2` policy only allows pure ML-KEM-1024 and has no classical fallback.
+</Note>
+
+|        Version        | secp256r1 | x25519 | secp384r1 | secp521r1 |
+|-----------------------|-----------|--------|-----------|-----------|
+| default_pq / 20250721 |     X     |   X    |     X     |     X     |
+| 20250512              |     X     |   X    |     X     |     X     |
+| cnsa_1_2_interop      |           |        |     X     |           |
+
+### Cipher suites
+
+|        Version        | AES-CBC | AES-GCM | CHACHAPOLY |
+|-----------------------|---------|---------|------------|
+| default_pq / 20250721 |    X    |    X    |     X      |
+| 20250512              |    X    |    X    |     X      |
+| cnsa_2                |         |    X    |            |
+| cnsa_1_2_interop      |         |    X    |            |
+
+### TLS protocol versions
+
+|        Version        | TLS 1.2 | TLS 1.3 |
+|-----------------------|---------|---------|
+| default_pq / 20250721 |    X    |    X    |
+| 20250512              |    X    |    X    |
+| cnsa_2                |         |    X    |
+| cnsa_1_2_interop      |    X    |    X    |
+
+## Default policy history
+
+|  s2n-tls version  | `default_pq` |
+|-------------------|--------------|
+|  v1.5.23          |   20250721   |
+|  v1.5.19          |   20250512   |
+|  v1.5.6           |   20241001   |
+|  v1.5.0           |   20240730   |
+
+## Checking whether PQ was negotiated
+
+Call `s2n_connection_get_kem_group_name()` after the handshake to determine whether PQ key exchange was negotiated and which KEM group was selected:
+
+```c
+const char *kem_group = s2n_connection_get_kem_group_name(conn);
+if (kem_group) {
+    printf("Negotiated PQ key exchange: %s\n", kem_group);
+} else {
+    printf("Used classical key exchange\n");
+}
+```

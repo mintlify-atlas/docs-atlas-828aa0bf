@@ -1,0 +1,319 @@
+---
+title: "Connection"
+description: "Create, configure, inspect, and reuse s2n_connection objects for TLS client and server connections."
+---
+
+## Overview
+
+All TLS activity in s2n-tls is performed through `s2n_connection` objects. Create one with `s2n_connection_new()`, associate it with a config and a file descriptor, perform the TLS handshake, and exchange application data. Connection objects can be reused across multiple connections by calling `s2n_connection_wipe()`.
+
+The connection struct is approximately 4 KB. s2n-tls maintainers carefully consider any size increases.
+
+## Connection mode
+
+```c
+typedef enum {
+    S2N_SERVER,
+    S2N_CLIENT
+} s2n_mode;
+```
+
+Pass one of these values to `s2n_connection_new()` to declare whether the connection acts as a TLS server or client.
+
+---
+
+## Creating and freeing connections
+
+### s2n_connection_new
+
+```c
+S2N_API extern struct s2n_connection *s2n_connection_new(s2n_mode mode);
+```
+
+Allocates and initializes a new connection object.
+
+<ParamField path="mode" type="s2n_mode" required>
+  `S2N_SERVER` for a server-side connection or `S2N_CLIENT` for a client-side connection.
+</ParamField>
+
+**Returns:** A pointer to the new `s2n_connection` on success, `NULL` on failure.
+
+---
+
+### s2n_connection_free
+
+```c
+S2N_API extern int s2n_connection_free(struct s2n_connection *conn);
+```
+
+Frees all memory associated with a connection. The handle is invalid after this call. Performs its own wipe of sensitive data; you do not need to call `s2n_connection_wipe()` first.
+
+<ParamField path="conn" type="struct s2n_connection *" required>
+  The connection to free.
+</ParamField>
+
+**Returns:** `S2N_SUCCESS` (0) on success, `S2N_FAILURE` (-1) on failure.
+
+---
+
+### s2n_connection_wipe
+
+```c
+S2N_API extern int s2n_connection_wipe(struct s2n_connection *conn);
+```
+
+Wipes all state from a connection and prepares it for reuse with a new TLS session. Erases all data including pending reads. Call after all I/O is complete and `s2n_shutdown()` has been called.
+
+<Note>
+Reusing connection handles with `s2n_connection_wipe()` is more efficient than repeatedly calling `s2n_connection_new()` and `s2n_connection_free()`.
+</Note>
+
+<ParamField path="conn" type="struct s2n_connection *" required>
+  The connection to wipe and prepare for reuse.
+</ParamField>
+
+**Returns:** `S2N_SUCCESS` on success, `S2N_FAILURE` on failure.
+
+---
+
+## Associating a config
+
+### s2n_connection_set_config
+
+```c
+S2N_API extern int s2n_connection_set_config(
+    struct s2n_connection *conn,
+    struct s2n_config     *config
+);
+```
+
+Associates an `s2n_config` object with the connection. The config controls cipher preferences, certificates, trust store, and many other options.
+
+<Warning>
+Do not modify the `s2n_config` after it has been set on a connection — doing so produces undefined behavior.
+</Warning>
+
+<ParamField path="conn" type="struct s2n_connection *" required>
+  The connection to configure.
+</ParamField>
+
+<ParamField path="config" type="struct s2n_config *" required>
+  The configuration object to associate with the connection.
+</ParamField>
+
+**Returns:** `S2N_SUCCESS` on success, `S2N_FAILURE` on failure.
+
+---
+
+## Setting file descriptors
+
+### s2n_connection_set_fd
+
+```c
+S2N_API extern int s2n_connection_set_fd(struct s2n_connection *conn, int fd);
+```
+
+Sets a single file descriptor for both reading and writing. The file descriptor must be active and connected.
+
+<Warning>
+If the read end of the pipe is closed unexpectedly, writing raises `SIGPIPE`. s2n-tls does **not** handle `SIGPIPE`. Your application must handle or ignore it (for example, `signal(SIGPIPE, SIG_IGN)`).
+</Warning>
+
+<ParamField path="conn" type="struct s2n_connection *" required>
+  The connection to configure.
+</ParamField>
+
+<ParamField path="fd" type="int" required>
+  An active, connected file descriptor to use for both reads and writes.
+</ParamField>
+
+**Returns:** `S2N_SUCCESS` on success, `S2N_FAILURE` on failure.
+
+---
+
+### s2n_connection_set_read_fd
+
+```c
+S2N_API extern int s2n_connection_set_read_fd(struct s2n_connection *conn, int readfd);
+```
+
+Sets the file descriptor used for reading only. Use together with `s2n_connection_set_write_fd()` when read and write channels are separate.
+
+<ParamField path="conn" type="struct s2n_connection *" required>
+  The connection to configure.
+</ParamField>
+
+<ParamField path="readfd" type="int" required>
+  An active, connected file descriptor for reading.
+</ParamField>
+
+**Returns:** `S2N_SUCCESS` on success, `S2N_FAILURE` on failure.
+
+---
+
+### s2n_connection_set_write_fd
+
+```c
+S2N_API extern int s2n_connection_set_write_fd(struct s2n_connection *conn, int writefd);
+```
+
+Sets the file descriptor used for writing only.
+
+<ParamField path="conn" type="struct s2n_connection *" required>
+  The connection to configure.
+</ParamField>
+
+<ParamField path="writefd" type="int" required>
+  An active, connected file descriptor for writing.
+</ParamField>
+
+**Returns:** `S2N_SUCCESS` on success, `S2N_FAILURE` on failure.
+
+---
+
+## Memory management
+
+### s2n_connection_free_handshake
+
+```c
+S2N_API extern int s2n_connection_free_handshake(struct s2n_connection *conn);
+```
+
+Wipes and releases the memory allocated specifically for the TLS handshake. Call after the handshake has been successfully negotiated and all handshake data logging is complete.
+
+<Note>
+If `s2n_connection_wipe()` is later called, handshake memory will be reallocated. Freeing it may result in additional allocations.
+</Note>
+
+<ParamField path="conn" type="struct s2n_connection *" required>
+  The connection whose handshake memory should be freed.
+</ParamField>
+
+**Returns:** `S2N_SUCCESS` on success, `S2N_FAILURE` on failure.
+
+---
+
+### s2n_connection_release_buffers
+
+```c
+S2N_API extern int s2n_connection_release_buffers(struct s2n_connection *conn);
+```
+
+Wipes and frees the `in` and `out` I/O buffers associated with the connection. Useful for connections in a keep-alive or idle state to reduce long-lived memory overhead.
+
+<ParamField path="conn" type="struct s2n_connection *" required>
+  The connection whose I/O buffers should be released.
+</ParamField>
+
+**Returns:** `S2N_SUCCESS` on success, `S2N_FAILURE` on failure.
+
+---
+
+## Querying connection state
+
+### s2n_connection_get_actual_protocol_version
+
+```c
+S2N_API extern int s2n_connection_get_actual_protocol_version(struct s2n_connection *conn);
+```
+
+Returns the TLS protocol version negotiated during the handshake. Call after `s2n_negotiate()` succeeds.
+
+The return value corresponds to one of the version constants:
+
+| Constant | Value | Version |
+|---|---|---|
+| `S2N_SSLv2` | 20 | SSL 2.0 |
+| `S2N_SSLv3` | 30 | SSL 3.0 |
+| `S2N_TLS10` | 31 | TLS 1.0 |
+| `S2N_TLS11` | 32 | TLS 1.1 |
+| `S2N_TLS12` | 33 | TLS 1.2 |
+| `S2N_TLS13` | 34 | TLS 1.3 |
+
+<ParamField path="conn" type="struct s2n_connection *" required>
+  The connection to query.
+</ParamField>
+
+**Returns:** The integer version constant, or `S2N_UNKNOWN_PROTOCOL_VERSION` (0) if not yet negotiated.
+
+---
+
+### s2n_connection_get_cipher
+
+```c
+S2N_API extern const char *s2n_connection_get_cipher(struct s2n_connection *conn);
+```
+
+Returns a human-readable string for the cipher suite negotiated by the handshake, in OpenSSL format (for example, `"TLS_AES_128_GCM_SHA256"`).
+
+<Warning>
+Returns `"TLS_NULL_WITH_NULL_NULL"` before the handshake is complete. This is a placeholder and does not indicate that cipher suite will be used.
+</Warning>
+
+<ParamField path="conn" type="struct s2n_connection *" required>
+  The connection to query.
+</ParamField>
+
+**Returns:** A pointer to a null-terminated cipher suite name string.
+
+---
+
+### s2n_connection_get_curve
+
+```c
+S2N_API extern const char *s2n_connection_get_curve(struct s2n_connection *conn);
+```
+
+Returns the name of the elliptic curve used for key exchange, or `"NONE"` if no curve was used. Call after the handshake has completed.
+
+<ParamField path="conn" type="struct s2n_connection *" required>
+  The connection to query.
+</ParamField>
+
+**Returns:** A pointer to a null-terminated curve name string.
+
+---
+
+### s2n_connection_get_alert
+
+```c
+S2N_API extern int s2n_connection_get_alert(struct s2n_connection *conn);
+```
+
+Returns the TLS alert code received from the peer, if any. Useful when `s2n_error_get_type(s2n_errno)` returns `S2N_ERR_T_ALERT`.
+
+<ParamField path="conn" type="struct s2n_connection *" required>
+  The connection to query.
+</ParamField>
+
+**Returns:** The alert code received, or `S2N_FAILURE` if no alert was received.
+
+---
+
+## Example: basic connection setup
+
+```c
+#include <s2n.h>
+
+/* Assumes config has already been created and fd is a connected socket */
+int setup_connection(struct s2n_config *config, int fd,
+                     struct s2n_connection **out_conn) {
+    struct s2n_connection *conn = s2n_connection_new(S2N_SERVER);
+    if (!conn) {
+        return S2N_FAILURE;
+    }
+
+    if (s2n_connection_set_config(conn, config) != S2N_SUCCESS) {
+        s2n_connection_free(conn);
+        return S2N_FAILURE;
+    }
+
+    if (s2n_connection_set_fd(conn, fd) != S2N_SUCCESS) {
+        s2n_connection_free(conn);
+        return S2N_FAILURE;
+    }
+
+    *out_conn = conn;
+    return S2N_SUCCESS;
+}
+```

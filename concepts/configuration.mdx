@@ -1,0 +1,137 @@
+---
+title: "Configuration"
+description: "How to create and free s2n_config objects, set security policies and client auth, manage the trust store, and share one config across many connections."
+---
+
+An `s2n_config` object holds settings that are shared across one or more connections: the security policy (cipher suites and protocol versions), certificate and key material, trust store, client authentication policy, and more.
+
+Create a config once at startup, associate it with many connections, and free it only after all connections that use it have been freed.
+
+## Creating a config
+
+<Tabs>
+  <Tab title="s2n_config_new()">
+    `s2n_config_new()` creates a config pre-populated with the system's default CA certificates in the trust store.
+
+    ```c
+    struct s2n_config *config = s2n_config_new();
+    if (!config) {
+        fprintf(stderr, "s2n_config_new failed\n");
+        exit(1);
+    }
+    ```
+
+    Use this variant for clients that need to verify server certificates against the system trust store without any additional setup.
+  </Tab>
+  <Tab title="s2n_config_new_minimal()">
+    `s2n_config_new_minimal()` creates a config without loading system certificates. It is faster to create because it skips the system CA scan.
+
+    ```c
+    struct s2n_config *config = s2n_config_new_minimal();
+    if (!config) {
+        fprintf(stderr, "s2n_config_new_minimal failed\n");
+        exit(1);
+    }
+    ```
+
+    Use this variant for servers (which don't need a client-facing trust store), or clients that supply their own CA material. Call `s2n_config_load_system_certs()` later if you need to add system certificates.
+
+    <Tip>
+      Prefer `s2n_config_new_minimal()` in latency-sensitive startup paths. The system CA scan performed by `s2n_config_new()` can be slow on systems with large trust stores.
+    </Tip>
+  </Tab>
+</Tabs>
+
+## Freeing a config
+
+Call `s2n_config_free()` when the config is no longer needed.
+
+```c
+s2n_config_free(config);
+```
+
+<Warning>
+  Only free a config after all connections that use it have been freed. Freeing a config while a connection still references it produces undefined behavior.
+</Warning>
+
+## Sharing a config across connections
+
+<Note>
+  An `s2n_config` object is safe to read concurrently from multiple threads once it has been set on a connection. Do not modify a config after it has been associated with any connection — doing so produces undefined behavior.
+</Note>
+
+Create one config at startup, then pass it to every new connection:
+
+```c
+/* At startup */
+struct s2n_config *config = s2n_config_new();
+s2n_config_set_cipher_preferences(config, "default_tls13");
+/* ... load certificates, configure trust, etc. ... */
+
+/* Per connection — config is read-only at this point */
+struct s2n_connection *conn = s2n_connection_new(S2N_SERVER);
+s2n_connection_set_config(conn, config);
+```
+
+## Key configuration options
+
+### Security policy (cipher preferences)
+
+`s2n_config_set_cipher_preferences()` selects the security policy, which controls the allowed TLS protocol versions, cipher suites, signature algorithms, and key exchange methods.
+
+```c
+if (s2n_config_set_cipher_preferences(config, "default_tls13") < 0) {
+    fprintf(stderr, "s2n_config_set_cipher_preferences: %s\n",
+            s2n_strerror(s2n_errno, "EN"));
+    exit(1);
+}
+```
+
+The policy name `"default_tls13"` enables TLS 1.2 and TLS 1.3 with a conservative set of cipher suites. See the [security policies guide](/features/security-policies) for all available policy names and their properties.
+
+### Certificates
+
+For TLS servers, load at least one certificate chain and private key:
+
+```c
+struct s2n_cert_chain_and_key *chain_and_key = s2n_cert_chain_and_key_new();
+s2n_cert_chain_and_key_load_pem(chain_and_key, cert_pem, key_pem);
+s2n_config_add_cert_chain_and_key_to_store(config, chain_and_key);
+```
+
+See the [Certificates](/features/certificates) guide for mutual TLS, OCSP stapling, CRL validation, and SNI-based certificate selection.
+
+### Trust store
+
+For TLS clients, configure which CAs are trusted for server certificate verification. `s2n_config_new()` loads system CAs automatically; `s2n_config_new_minimal()` does not.
+
+```c
+/* Trust a specific CA file */
+s2n_config_set_verification_ca_location(config, "/path/to/ca.pem", NULL);
+```
+
+### Client authentication
+
+By default, servers do not request client certificates. Use `s2n_config_set_client_auth_type()` to enable mutual TLS:
+
+```c
+/* Require a client certificate — abort if the client doesn't send one */
+s2n_config_set_client_auth_type(config, S2N_CERT_AUTH_REQUIRED);
+
+/* Request a client certificate but allow the handshake to proceed without one */
+s2n_config_set_client_auth_type(config, S2N_CERT_AUTH_OPTIONAL);
+```
+
+The `s2n_cert_auth_type` enum has three values:
+
+| Value | Server behavior | Client behavior |
+|---|---|---|
+| `S2N_CERT_AUTH_NONE` | Does not request a client certificate (default) | Aborts if the server requests client auth |
+| `S2N_CERT_AUTH_REQUIRED` | Requests a client certificate; aborts if none is received | Sends the client certificate; aborts if the server doesn't request it |
+| `S2N_CERT_AUTH_OPTIONAL` | Requests a client certificate; proceeds if none is received (default) | Sends the client certificate if available |
+
+## Overriding config settings per connection
+
+Some config settings can be overridden on a per-connection basis. For example, `s2n_config_append_protocol_preference()` sets ALPN protocols on a config, while `s2n_connection_append_protocol_preference()` overrides them for a single connection.
+
+Not every config option has a corresponding connection-level override. If you need a per-connection override that does not exist, [open an issue](https://github.com/aws/s2n-tls/issues) explaining your use case.

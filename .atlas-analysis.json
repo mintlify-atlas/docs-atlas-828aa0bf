@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "s2n-tls",
+  "projectType": "sdk-library",
+  "projectName": "s2n-tls",
+  "projectDescription": "A simple, small, fast, and secure C99 implementation of the TLS/SSL protocols designed for use in production applications.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#1A3A5C",
-    "light": "#2E6DA4",
-    "dark": "#0F2238"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/aws/s2n-tls"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/aws/s2n-tls"
-    }
-  },
+  "primaryColor": "#1A3A5C",
+  "lightColor": "#2E6DA4",
+  "darkColor": "#0F2238",
   "navigation": {
     "tabs": [
       {
@@ -97,5 +85,46 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "TLS 1.0, 1.1, 1.2, and 1.3 support",
+    "Post-quantum cryptography (ML-KEM and ML-DSA)",
+    "FIPS mode support via AWS-LC or OpenSSL",
+    "Multiple libcrypto backends (AWS-LC, OpenSSL, BoringSSL, LibreSSL)",
+    "Security policies for easy cipher suite management",
+    "Non-blocking and full-duplex I/O support",
+    "Session resumption and pre-shared keys",
+    "Certificate revocation via OCSP stapling and CRLs",
+    "Timing blinding to prevent side-channel attacks",
+    "Rust language bindings",
+    "Memory protection and erase-on-read",
+    "Minimal attack surface by design"
+  ],
+  "publicApiSurface": [
+    "s2n_init()",
+    "s2n_cleanup()",
+    "s2n_cleanup_final()",
+    "s2n_config_new()",
+    "s2n_config_free()",
+    "s2n_config_set_cipher_preferences()",
+    "s2n_config_add_cert_chain_and_key_to_store()",
+    "s2n_config_set_verification_ca_location()",
+    "s2n_config_set_client_auth_type()",
+    "s2n_connection_new()",
+    "s2n_connection_free()",
+    "s2n_connection_set_config()",
+    "s2n_connection_set_fd()",
+    "s2n_negotiate()",
+    "s2n_send()",
+    "s2n_recv()",
+    "s2n_shutdown()",
+    "s2n_connection_wipe()",
+    "s2n_cert_chain_and_key_new()",
+    "s2n_cert_chain_and_key_load_pem_bytes()",
+    "s2n_strerror()",
+    "s2n_error_get_type()",
+    "s2n_connection_get_actual_protocol_version()",
+    "s2n_connection_get_cipher()",
+    "s2n_set_server_name()"
+  ]
 }

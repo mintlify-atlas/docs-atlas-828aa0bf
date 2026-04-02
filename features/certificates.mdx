@@ -1,0 +1,232 @@
+---
+title: "Certificates and authentication"
+description: "How to configure trust stores, load server certificates, enable mutual TLS, inspect peer certificates, and set up OCSP stapling and CRL validation in s2n-tls."
+---
+
+TLS uses certificates to authenticate the server and, optionally, the client. The handshake fails if the client cannot verify the server's certificate.
+
+<Tip>
+  Authentication is usually the most expensive part of the TLS handshake. To avoid the cost on subsequent connections, consider [session resumption](/features/session-resumption) or [pre-shared keys](/features/pre-shared-keys).
+</Tip>
+
+## Configuring the trust store
+
+To validate a peer's certificate, the config's local trust store must contain a certificate that can authenticate the peer's certificate chain. Two functions add certificates to the trust store:
+
+- `s2n_config_set_verification_ca_location()` — load CA certificates from a file or directory on disk.
+- `s2n_config_add_pem_to_trust_store()` — load a PEM-encoded CA certificate from memory.
+
+`s2n_config_new()` initializes the trust store with the default system certificates, which may include public CAs or other unexpected certificates. If s2n-tls is verifying certificates and does not require the default system certificates, clear them first with `s2n_config_wipe_trust_store()`:
+
+```c
+struct s2n_config *config = s2n_config_new();
+
+/* Remove default system CAs before loading your own */
+s2n_config_wipe_trust_store(config);
+
+/* Load your CA certificate from a file */
+s2n_config_set_verification_ca_location(config, "/path/to/ca.pem", NULL);
+
+/* Or load it from memory */
+s2n_config_add_pem_to_trust_store(config, pem_data);
+```
+
+<Note>
+  The `s2n_verify_host_fn` callback must be implemented to validate the identity of all received certificates. A client implementation is set by default. If certificates are self-signed or issued by a privately owned CA, the callback does not need to perform additional identity validation, but `s2n_config_wipe_trust_store()` should still be called before adding certificates to avoid implicitly trusting unexpected default system certificates.
+</Note>
+
+Configs created with `s2n_config_new_minimal()` start with an empty trust store. To load the default system certificates into such a config, call `s2n_config_load_system_certs()`.
+
+## Server authentication
+
+A server must have a certificate and private key pair to prove its identity. s2n-tls supports RSA, RSA-PSS, and ECDSA certificates, and allows one of each type per domain name.
+
+<Steps>
+  <Step title="Create a certificate and key object">
+    ```c
+    struct s2n_cert_chain_and_key *chain_and_key = s2n_cert_chain_and_key_new();
+    ```
+  </Step>
+  <Step title="Load the PEM-encoded data">
+    ```c
+    if (s2n_cert_chain_and_key_load_pem_bytes(
+            chain_and_key,
+            (uint8_t *)cert_pem, cert_pem_len,
+            (uint8_t *)key_pem,  key_pem_len) < 0) {
+        fprintf(stderr, "Failed to load cert/key: %s\n",
+                s2n_strerror(s2n_errno, "EN"));
+        return -1;
+    }
+    ```
+  </Step>
+  <Step title="Add the certificate to the config">
+    ```c
+    s2n_config_add_cert_chain_and_key_to_store(config, chain_and_key);
+    ```
+  </Step>
+  <Step title="Free the object when no longer needed">
+    ```c
+    s2n_cert_chain_and_key_free(chain_and_key);
+    ```
+  </Step>
+</Steps>
+
+A client can restrict the certificate's hostname by setting a custom `s2n_verify_host_fn` with `s2n_config_set_verify_host_callback()` or `s2n_connection_set_verify_host_callback()`. The default behavior requires the hostname to match the server name set with `s2n_set_server_name()`.
+
+## Server Name Indication (SNI)
+
+TLS servers often serve multiple domains from a single IP address, each potentially requiring a different certificate. The client uses the SNI extension to tell the server which domain it is connecting to, so the server can select the correct certificate.
+
+### Client configuration
+
+Call `s2n_set_server_name()` on a client connection to set the domain name sent in the SNI extension:
+
+```c
+s2n_set_server_name(conn, "example.com");
+```
+
+### Server configuration
+
+Each certificate loaded with `s2n_config_add_cert_chain_and_key_to_store()` is automatically associated with every domain name in its Subject Alternative Name (SAN) field. If the certificate has no SAN field, the Common Name (CN) field is used instead.
+
+During the handshake, s2n-tls automatically selects the certificate that matches the client's SNI value. Selection priority is:
+
+1. Exact SNI match.
+2. Wildcard match (a domain starting with `*.`, covering all subdomains).
+3. Default certificate — used when no SNI match exists or the client sends no SNI extension.
+
+The default certificate is the first certificate loaded for each type (RSA, RSA-PSS, ECDSA). Use `s2n_config_set_cert_chain_and_key_defaults()` to override the defaults.
+
+s2n-tls allows at most one certificate per domain per certificate type. If a newly loaded certificate overlaps with an existing domain, the existing certificate is kept by default. Implement `s2n_cert_tiebreak_callback` to customize this behavior.
+
+## Mutual TLS (client authentication)
+
+Client authentication is disabled by default. To require it, configure both sides of the connection.
+
+Call `s2n_config_set_client_auth_type()` or `s2n_connection_set_client_auth_type()` with `S2N_CERT_AUTH_REQUIRED` on both the client and server:
+
+```c
+/* On both client and server configs */
+s2n_config_set_client_auth_type(config, S2N_CERT_AUTH_REQUIRED);
+```
+
+The client also needs a certificate and key loaded (see [Server authentication](#server-authentication)), and the server needs a trust store configured (see [Configuring the trust store](#configuring-the-trust-store)).
+
+<Warning>
+  When using client authentication, the server **must** implement `s2n_verify_host_fn`. The default behavior rejects all client certificates.
+</Warning>
+
+<Note>
+  With TLS 1.3, `s2n_negotiate()` reports a successful handshake to the client before the server has validated the client certificate. If the server later rejects the certificate, the client may receive a TLS alert during `s2n_recv()`, potentially after already sending application data via `s2n_send()`. There is no security risk — the client has already authenticated the server — but it can make error handling more complex.
+</Note>
+
+## Certificate inspection
+
+Servers can load multiple certificates, and applications may need to know which one was selected for a given connection.
+
+- `s2n_connection_get_selected_cert()` — returns the local certificate chain used to authenticate.
+- `s2n_connection_get_peer_cert_chain()` — returns the peer's certificate chain, if one was sent.
+
+Parse a certificate chain with `s2n_cert_chain_get_length()` and `s2n_cert_chain_get_cert()`. Retrieve a DER-encoded certificate with `s2n_cert_get_der()`.
+
+```c
+struct s2n_cert_chain_and_key *selected = s2n_connection_get_selected_cert(conn);
+
+struct s2n_cert_chain *peer_chain = NULL;
+s2n_connection_get_peer_cert_chain(conn, &peer_chain);
+
+uint32_t len = 0;
+s2n_cert_chain_get_length(peer_chain, &len);
+
+struct s2n_cert *cert = NULL;
+s2n_cert_chain_get_cert(peer_chain, &cert, 0 /* index */);
+
+const uint8_t *der = NULL;
+uint32_t der_len = 0;
+s2n_cert_get_der(cert, &der, &der_len);
+```
+
+### Certificate extensions
+
+Use `s2n_cert_get_x509_extension_value_length()` and `s2n_cert_get_x509_extension_value()` to retrieve a specific DER-encoded extension. Use `s2n_cert_get_utf8_string_from_extension_data_length()` and `s2n_cert_get_utf8_string_from_extension_data()` to retrieve the UTF-8 string representation instead. These functions work for both RFC-defined and custom extensions.
+
+## Certificate revocation
+
+s2n-tls supports two revocation methods: OCSP stapling and CRLs.
+
+With **OCSP stapling**, the peer that holds the certificate validates its own revocation status and attaches the result to the TLS handshake. With **CRLs**, the application checks the revocation status itself, without relying on the peer. CRLs require more network and memory resources because the application must retrieve and store them.
+
+<Tip>
+  Use OCSP stapling if you can rely on your peer to support it. Use CRLs if you cannot make that assumption, but only when you are able to obtain CRLs in advance — s2n-tls does not support fetching CRLs in real time.
+</Tip>
+
+### OCSP stapling
+
+OCSP (Online Certificate Status Protocol) lets a requester ask the certificate holder to attach a revocation status response to the handshake.
+
+To enable OCSP stapling:
+
+1. The **requester** (usually the client) calls `s2n_config_set_status_request_type()` with `S2N_STATUS_REQUEST_OCSP`.
+2. The **responder** (usually the server) calls `s2n_cert_chain_and_key_set_ocsp_data()` with the raw OCSP bytes.
+
+```c
+/* Requester */
+s2n_config_set_status_request_type(config, S2N_STATUS_REQUEST_OCSP);
+
+/* Responder */
+s2n_cert_chain_and_key_set_ocsp_data(chain_and_key, ocsp_data, ocsp_data_len);
+```
+
+If the underlying libcrypto supports OCSP validation, s2n-tls validates the stapled response automatically. Call `s2n_config_set_check_stapled_ocsp_response(config, 0)` to disable automatic validation. Call `s2n_connection_get_ocsp_response()` to retrieve the raw response for manual inspection.
+
+OCSP stapling applies to both client and server certificates in TLS 1.3, but only to server certificates in TLS 1.2.
+
+### CRL validation
+
+<Warning>
+  CRL validation is an unstable API in s2n-tls and is subject to change in a future release. To access the CRL APIs, include `api/unstable/crl.h`.
+</Warning>
+
+Certificate Revocation Lists (CRLs) are CA-published lists of unexpired certificates that have been revoked. To use CRL validation:
+
+<Steps>
+  <Step title="Implement and register the CRL lookup callback">
+    Implement `s2n_crl_lookup_cb` and register it with `s2n_config_set_crl_lookup_cb()`. s2n-tls calls this callback once per certificate in the received chain.
+  </Step>
+  <Step title="Load CRLs into memory before the handshake">
+    Create CRL objects with `s2n_crl_new()`, populate them with `s2n_crl_load_pem()`, and free them with `s2n_crl_free()` when finished.
+  </Step>
+  <Step title="Match CRLs to certificates in the callback">
+    Compare issuer hashes using `s2n_crl_lookup_get_cert_issuer_hash()` and `s2n_crl_get_issuer_hash()`. When a match is found, call `s2n_crl_lookup_set()` to provide s2n-tls with the matching CRL.
+
+    ```c
+    /* If no matching CRL is found, call s2n_crl_lookup_ignore() */
+    s2n_crl_lookup_ignore(lookup);
+    ```
+
+    Ignoring a certificate with `s2n_crl_lookup_ignore()` causes validation to fail with `S2N_ERR_CRL_LOOKUP_FAILED` if that certificate is part of the trusted chain.
+  </Step>
+</Steps>
+
+By default, CRL validation does not fail on CRLs that are not yet active or have expired. Call `s2n_crl_validate_active()` and `s2n_crl_validate_not_expired()` inside the lookup callback to enforce timestamp validation.
+
+## Certificate transparency
+
+Certificate transparency (CT) provides a public log of CA-issued certificates. Certificate owners can attach a Signed Certificate Timestamp (SCT) to prove their certificate appears in these logs.
+
+To use certificate transparency:
+
+1. The **requester** (usually the client) calls `s2n_config_set_ct_support_level()` with `S2N_CT_SUPPORT_REQUEST`.
+2. The **responder** (usually the server) calls `s2n_cert_chain_and_key_set_sct_list()` with the raw SCT bytes.
+
+```c
+/* Requester */
+s2n_config_set_ct_support_level(config, S2N_CT_SUPPORT_REQUEST);
+
+/* Responder */
+s2n_cert_chain_and_key_set_sct_list(chain_and_key, sct_data, sct_data_len);
+```
+
+Call `s2n_connection_get_sct_list()` to retrieve the received transparency information. The data format is the `SignedCertificateTimestampList` structure defined in section 3.3 of RFC 6962.
+
+Certificate transparency applies to both client and server certificates in TLS 1.3, but only to server certificates in TLS 1.2.

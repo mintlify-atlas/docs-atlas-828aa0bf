@@ -1,0 +1,178 @@
+---
+title: "Security policies"
+description: "How to select a security policy in s2n-tls, what each policy enables, and the tradeoffs between named and versioned policies."
+---
+
+s2n-tls uses pre-made security policies to help avoid common TLS misconfiguration mistakes. A security policy bundles the allowed cipher suites, protocol versions, signature schemes, and elliptic curves into a single named string. Call `s2n_config_set_cipher_preferences()` to apply a policy to a config:
+
+```c
+if (s2n_config_set_cipher_preferences(config, "default") < 0) {
+    fprintf(stderr, "Failed to set cipher preferences: %s\n",
+            s2n_strerror(s2n_errno, "EN"));
+    return -1;
+}
+```
+
+## Named vs. versioned policies
+
+s2n-tls provides two categories of policy:
+
+- **Named policies** (`default`, `default_fips`, `default_tls13`, `default_pq`, `rfc9151`) track current security best practices and may change across library releases.
+- **Versioned policies** (date-stamped strings such as `"20240503"`) are frozen and will never change.
+
+<Warning>
+  Named policies may add or remove cipher suites, protocol versions, or other options when the library is updated. Peers that depend on legacy options may fail to negotiate a connection after a library upgrade. Use a versioned policy if you require stability guarantees.
+</Warning>
+
+The current fixed equivalents for the named policies are:
+
+| Named policy    | Fixed equivalent |
+|-----------------|-----------------|
+| `default`       | `20251014`       |
+| `default_fips`  | `20251015`       |
+| `default_tls13` | `20240503`       |
+| `rfc9151`       | `20251013`       |
+
+`rfc9151` is derived from [RFC 9151 — CNSA Suite Profile for TLS 1.2 and 1.3](https://datatracker.ietf.org/doc/html/rfc9151). It restricts certificate signature algorithms to RSA or ECDSA with SHA-384, which may require you to update your certificates. Like other named policies, `rfc9151` may change if the source RFC definition changes.
+
+If a policy is deprecated — for example because s2n-tls drops support for an algorithm the policy depends on — calling `s2n_config_set_cipher_preferences()` with that policy name returns `S2N_ERR_DEPRECATED_SECURITY_POLICY`.
+
+## Protocol version support
+
+The default security policy supports TLS 1.3 and negotiates it wherever possible. s2n-tls supports older versions including TLS 1.0 and TLS 1.1, but their use is not recommended.
+
+s2n-tls will not negotiate SSL 2.0, but accepts SSLv2 ClientHellos advertising a higher protocol version such as TLS 1.2. Compatibility with SSLv2 ClientHellos or older TLS versions may require older cipher suites (SHA-1, 3DES, RSA or DHE key exchange). Policies that allow older protocol versions but not those cipher suites may fail to handshake with older peers.
+
+## Policy comparison tables
+
+### Protocol versions and cipher suites
+
+|    version    | TLS1.0 | TLS1.1 | TLS1.2 | TLS1.3 | AES-CBC | AES-GCM | CHACHAPOLY | 3DES | RC4 | DHE | ECDHE | RSA kx |
+|---------------|--------|--------|--------|--------|---------|---------|------------|------|-----|-----|-------|--------|
+|    default    |        |        |    X   |    X   |    X    |    X    |      X     |      |     |     |   X   |        |
+| default_fips  |        |        |    X   |    X   |    X    |    X    |            |      |     |     |   X   |        |
+| default_tls13 |        |        |    X   |    X   |    X    |    X    |      X     |      |     |     |   X   |        |
+|   20240501    |        |        |    X   |        |    X    |    X    |            |      |     |     |   X   |        |
+|   20240502    |        |        |    X   |        |    X    |    X    |            |      |     |     |   X   |        |
+|   20240503    |        |        |    X   |    X   |    X    |    X    |            |      |     |     |   X   |        |
+|   20230317    |        |        |    X   |    X   |    X    |    X    |            |      |     |     |   X   |        |
+|   20240331    |        |        |    X   |        |    X    |    X    |            |      |     |     |   X   |        |
+|   20190214    |    X   |    X   |    X   |        |    X    |    X    |            |   X  |     |  X  |   X   |    X   |
+|   20170718    |    X   |    X   |    X   |        |    X    |    X    |            |      |     |     |   X   |    X   |
+|   20170405    |    X   |    X   |    X   |        |    X    |    X    |            |   X  |     |     |   X   |    X   |
+|   20170328    |    X   |    X   |    X   |        |    X    |    X    |            |   X  |     |  X  |   X   |    X   |
+|   20170210    |    X   |    X   |    X   |        |    X    |    X    |      X     |      |     |     |   X   |    X   |
+|   20160824    |    X   |    X   |    X   |        |    X    |    X    |            |      |     |     |   X   |    X   |
+|   20160804    |    X   |    X   |    X   |        |    X    |    X    |            |   X  |     |     |   X   |    X   |
+|   20160411    |    X   |    X   |    X   |        |    X    |    X    |            |   X  |     |     |   X   |    X   |
+|   20150306    |    X   |    X   |    X   |        |    X    |    X    |            |   X  |     |     |   X   |    X   |
+|   20150214    |    X   |    X   |    X   |        |    X    |    X    |            |   X  |     |  X  |       |    X   |
+|   20150202    |    X   |    X   |    X   |        |    X    |         |            |   X  |     |  X  |       |    X   |
+|   20141001    |    X   |    X   |    X   |        |    X    |         |            |   X  |  X  |  X  |       |    X   |
+|   20190120    |    X   |    X   |    X   |        |    X    |    X    |      X     |   X  |     |     |   X   |    X   |
+|   20190121    |    X   |    X   |    X   |        |    X    |    X    |      X     |   X  |     |     |   X   |    X   |
+|   20190122    |    X   |    X   |    X   |        |    X    |    X    |      X     |   X  |     |     |   X   |    X   |
+|   20190801    |    X   |    X   |    X   |    X   |    X    |    X    |      X     |      |     |     |   X   |    X   |
+|   20190802    |    X   |    X   |    X   |    X   |    X    |    X    |      X     |      |     |     |   X   |    X   |
+|   20200207    |        |        |        |    X   |         |    X    |      X     |      |     |     |   X   |        |
+|    rfc9151    |        |        |    X   |    X   |         |    X    |            |      |     |     |   X   |        |
+
+### Signature schemes
+
+|    version    | RSA PKCS1 | ECDSA | SHA-1 legacy | RSA PSS |
+|---------------|-----------|-------|--------------|---------|
+|    default    |     X     |   X   |              |    X    |
+| default_fips  |     X     |   X   |              |    X    |
+| default_tls13 |     X     |   X   |              |    X    |
+|   20240501    |     X     |   X   |              |    X    |
+|   20240502    |     X     |   X   |              |    X    |
+|   20240503    |     X     |   X   |              |    X    |
+|   20230317    |     X     |   X   |              |    X    |
+|   20190214    |     X     |   X   |       X      |         |
+|   20170718    |     X     |       |       X      |         |
+|   20170405    |     X     |       |       X      |         |
+|   20170328    |     X     |       |       X      |         |
+|   20170210    |     X     |       |       X      |         |
+|   20160824    |     X     |       |       X      |         |
+|   20160804    |     X     |       |       X      |         |
+|   20160411    |     X     |       |       X      |         |
+|   20150306    |     X     |       |       X      |         |
+|   20150214    |     X     |       |       X      |         |
+|   20150202    |     X     |       |       X      |         |
+|   20141001    |     X     |       |       X      |         |
+|   20190120    |     X     |       |       X      |         |
+|   20190121    |     X     |       |       X      |         |
+|   20190122    |     X     |       |       X      |         |
+|   20190801    |     X     |   X   |       X      |    X    |
+|   20190802    |     X     |   X   |       X      |    X    |
+|   20200207    |           |   X   |              |    X    |
+|    rfc9151    |     X     |   X   |              |    X    |
+
+<Note>
+  Legacy SHA-1 algorithms are not supported in TLS 1.3. They are only negotiated if TLS 1.2 is selected and the policy permits them.
+</Note>
+
+<Note>
+  RSA-PSS certificates are unavailable when s2n-tls is built against OpenSSL 1.0.2. RSA-PSS-RSAE signatures (RSA cert with PSS padding) remain available, but RSA-PSS-PSS (PSS cert with PSS padding) does not.
+</Note>
+
+### Elliptic curves and groups
+
+|    version    | secp256r1 | secp384r1 | x25519 |
+|---------------|-----------|-----------|--------|
+|    default    |     X     |     X     |    X   |
+| default_fips  |     X     |     X     |        |
+| default_tls13 |     X     |     X     |    X   |
+|   20240501    |     X     |     X     |    X   |
+|   20240502    |     X     |     X     |        |
+|   20240503    |     X     |     X     |    X   |
+|   20230317    |     X     |     X     |        |
+|   20190214    |     X     |     X     |        |
+|   20170718    |     X     |     X     |        |
+|   20170405    |     X     |     X     |        |
+|   20170328    |     X     |     X     |        |
+|   20170210    |     X     |     X     |        |
+|   20160824    |     X     |     X     |        |
+|   20160804    |     X     |     X     |        |
+|   20160411    |     X     |     X     |        |
+|   20150306    |     X     |     X     |        |
+|   20150214    |           |           |        |
+|   20150202    |           |           |        |
+|   20141001    |           |           |        |
+|   20190120    |     X     |     X     |        |
+|   20190121    |     X     |     X     |        |
+|   20190122    |     X     |     X     |        |
+|   20190801    |     X     |     X     |    X   |
+|   20190802    |     X     |     X     |        |
+|   20200207    |     X     |     X     |    X   |
+|    rfc9151    |           |     X     |        |
+
+## Preference order
+
+s2n-tls does not expose an API to control per-cipher preference order. The internal ordering rules are:
+
+1. Always prefer the highest protocol version supported.
+2. Always use forward secrecy where possible; prefer ECDHE over DHE.
+3. Prefer encryption ciphers in this order: AES-128, AES-256, ChaCha20, 3DES, RC4.
+4. Prefer record authentication modes in this order: GCM, Poly1305, SHA-256, SHA-1, MD5.
+
+<Note>
+  ChaCha20-Poly1305 cipher suites are unavailable when s2n-tls is built against OpenSSL 1.0.2, which does not implement the required encrypt/decrypt functions.
+</Note>
+
+## ChaCha20 boosting
+
+s2n-tls normally prefers AES over ChaCha20. Some clients — particularly mobile or IoT devices — do not have AES hardware acceleration, making ChaCha20 more efficient for them. These clients signal their preference by listing ChaCha20 first during cipher suite negotiation.
+
+s2n-tls offers "ChaCha20 boosted" security policies that will select ChaCha20 over AES when a client indicates this preference. An example is `"CloudFront-TLS-1-2-2021-ChaCha20-Boosted"`, which is identical to `"CloudFront-TLS-1-2-2021"` except that ChaCha20 boosting is enabled.
+
+## Named policy history
+
+The table below shows which fixed policy each named policy mapped to at each s2n-tls release:
+
+|  Version   | `default`  | `default_fips` | `default_tls13` | `rfc9151`  |
+|------------|------------|----------------|-----------------|------------|
+|  v1.6.0    | 20251014   |   20251015     |    20240503     |  20251013  |
+|  v1.5.25   | 20240501   |   20240502     |    20240503     |  20250429  |
+|  v1.4.16   | 20240501   |   20240502     |    20240503     |    —       |
+|  Older     | 20170210   |   20240416     |    20240417     |    —       |

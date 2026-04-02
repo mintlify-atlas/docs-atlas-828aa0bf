@@ -1,0 +1,171 @@
+---
+title: "Error handling"
+description: "How s2n-tls reports errors, how to read and translate s2n_errno, error types for non-blocking I/O, timing blinding, and stack trace capture."
+---
+
+s2n-tls uses a consistent convention for signaling errors: functions that return `int` return `0` on success and `-1` on failure; functions that return a pointer return `NULL` on failure. When a function fails, `s2n_errno` is set to a value that describes the error.
+
+## Reading errors
+
+After a failure, call `s2n_strerror()` to get a human-readable description in English:
+
+```c
+if (s2n_config_set_cipher_preferences(config, "default_tls13") < 0) {
+    fprintf(stderr, "Setting cipher prefs failed: %s : %s\n",
+            s2n_strerror(s2n_errno, "EN"),
+            s2n_strerror_debug(s2n_errno, "EN"));
+    return -1;
+}
+```
+
+Three error-to-string functions are available:
+
+| Function | Returns |
+|---|---|
+| `s2n_strerror(s2n_errno, "EN")` | Human-readable error description in English |
+| `s2n_strerror_name(s2n_errno)` | Symbolic error name, such as `"S2N_ERR_CIPHER_NOT_SUPPORTED"` |
+| `s2n_strerror_debug(s2n_errno, "EN")` | Internal debug string including the source file and line number |
+
+<Tip>
+  Include `s2n_strerror_debug()` output when reporting issues to the s2n-tls team — the file and line number pinpoints where the error was raised.
+</Tip>
+
+After handling an error, clear `s2n_errno` to avoid confusion with any subsequent failure:
+
+```c
+s2n_errno = S2N_ERR_T_OK;
+```
+
+When using s2n-tls from a language other than C, obtain the address of the thread-local `s2n_errno` via `s2n_errno_location()` to ensure the same thread-local storage mechanism is used.
+
+## Error types
+
+s2n-tls organizes errors into types so that applications can handle broad categories without matching every individual error code. This is especially important for non-blocking I/O, where an operation that would block is not a fatal error.
+
+Use `s2n_error_get_type(s2n_errno)` to retrieve the type of the most recent error.
+
+| Type | Meaning |
+|---|---|
+| `S2N_ERR_T_BLOCKED` | The operation would block. Retry when the socket is ready. |
+| `S2N_ERR_T_CLOSED` | The peer closed the connection. This is an expected, non-error condition. |
+| `S2N_ERR_T_IO` | An I/O error occurred. Check `errno` for the system error. |
+| `S2N_ERR_T_PROTO` | A TLS protocol error occurred. |
+| `S2N_ERR_T_ALERT` | The peer sent a TLS alert. Use `s2n_connection_get_alert()` to retrieve it. |
+
+### Example: handling errors by type
+
+The pattern below is the recommended approach for non-blocking I/O loops:
+
+```c
+#define SUCCESS 0
+#define FAILURE 1
+#define RETRY   2
+
+s2n_errno = S2N_ERR_T_OK;
+if (s2n_negotiate(conn, &blocked) < 0) {
+    switch (s2n_error_get_type(s2n_errno)) {
+        case S2N_ERR_T_BLOCKED:
+            /* Not an error — the socket would block. Come back later. */
+            return RETRY;
+        case S2N_ERR_T_CLOSED:
+            /* Peer closed cleanly */
+            return SUCCESS;
+        case S2N_ERR_T_IO:
+            handle_io_err(errno);
+            return FAILURE;
+        case S2N_ERR_T_PROTO:
+            handle_proto_err();
+            return FAILURE;
+        case S2N_ERR_T_ALERT:
+            log_alert(s2n_connection_get_alert(conn));
+            return FAILURE;
+        default:
+            log_other_error();
+            return FAILURE;
+    }
+}
+```
+
+## Blinding
+
+Blinding is a defense against timing side-channel attacks such as [Lucky13](https://aws.amazon.com/blogs/security/s2n-and-lucky-13/). When s2n-tls detects an error that was triggered by the peer — for example, a malformed record — it introduces a delay before allowing the connection to be closed. This prevents an attacker from using precise response-time measurements to learn information about encrypted data.
+
+### Built-in blinding (default)
+
+By default, s2n-tls blocks the calling thread for a random duration between 10 and 30 seconds after a peer-triggered error occurs. No additional code is required.
+
+```c
+/* Default behavior — thread blocks for 10–30 seconds on peer errors */
+s2n_connection_set_blinding(conn, S2N_BUILT_IN_BLINDING);
+```
+
+### Self-service blinding
+
+For servers that handle many connections on a single thread, blocking the thread for up to 30 seconds is impractical. Use `S2N_SELF_SERVICE_BLINDING` to manage the delay yourself.
+
+```c
+s2n_connection_set_blinding(conn, S2N_SELF_SERVICE_BLINDING);
+```
+
+After `s2n_recv()` or `s2n_negotiate()` returns an error:
+
+1. Call `s2n_connection_get_delay()` to get the required delay in nanoseconds.
+2. Pause activity on the connection for that duration.
+3. Then call `s2n_shutdown()`, `close()`, or `shutdown()`.
+
+```c
+if (s2n_negotiate(conn, &blocked) < 0) {
+    if (s2n_error_get_type(s2n_errno) != S2N_ERR_T_BLOCKED) {
+        uint64_t delay_ns = s2n_connection_get_delay(conn);
+        /* Pause the connection for delay_ns nanoseconds,
+           then shut down and close the socket */
+        nanosleep_or_equivalent(delay_ns);
+        s2n_shutdown(conn, &blocked);
+        close(sockfd);
+    }
+}
+```
+
+<Warning>
+  `s2n_shutdown()` fails if called before the blinding delay has elapsed. Your delay implementation must have nanosecond-level resolution. Skipping or shortening the delay makes your application vulnerable to timing side-channel attacks.
+</Warning>
+
+### Configuring the maximum blinding delay
+
+`s2n_config_set_max_blinding_delay()` lowers the upper bound below the default 30 seconds. Reducing this value weakens the protection blinding provides.
+
+```c
+/* Set a 5-second maximum — only if client timeouts require it */
+s2n_config_set_max_blinding_delay(config, 5);
+```
+
+<Warning>
+  Do not lower the blinding delay without fully understanding the risk. The lower the delay, the fewer requests an attacker needs to execute a side-channel attack. If a lower delay is required due to client timeouts, set it as high as practically possible.
+</Warning>
+
+## Stack traces
+
+s2n-tls can capture a stack trace whenever an error is raised. Stack traces are disabled by default because they significantly increase the time taken to raise an error and can cause timing-sensitive tests to fail.
+
+Enable stack traces in one of two ways:
+
+<Tabs>
+  <Tab title="Environment variable">
+    Set `S2N_PRINT_STACKTRACE=1` before running your application. The stack trace is printed automatically when an error occurs.
+
+    ```bash
+    S2N_PRINT_STACKTRACE=1 ./my_tls_app
+    ```
+  </Tab>
+  <Tab title="In code">
+    Call `s2n_stack_traces_enabled_set()` to enable stack traces programmatically, then call `s2n_print_stacktrace()` to print the trace after an error.
+
+    ```c
+    s2n_stack_traces_enabled_set(true);
+
+    if (s2n_negotiate(conn, &blocked) < 0) {
+        s2n_print_stacktrace(stderr);
+    }
+    ```
+  </Tab>
+</Tabs>

@@ -1,0 +1,106 @@
+---
+title: "Security"
+description: "How to report vulnerabilities in s2n-tls, the threat model and shared responsibility boundaries, and the internal safety mechanisms built into the library."
+---
+
+## Reporting vulnerabilities
+
+<Warning>
+  Do not open a public GitHub issue to report a security concern. Public disclosure before a fix is available can put users at risk.
+</Warning>
+
+To report a potential security vulnerability in s2n-tls:
+
+- Submit through the [AWS Vulnerability Disclosure Program on HackerOne](https://hackerone.com/aws_vdp)
+- Or send a report by email to [aws-security@amazon.com](mailto:aws-security@amazon.com)
+
+For full details, visit the [AWS Vulnerability Reporting Page](https://aws.amazon.com/security/vulnerability-reporting/).
+
+If you package or distribute s2n-tls, or use s2n-tls as part of a large multi-user service, you may be eligible for pre-notification of future releases. Contact [s2n-pre-notification@amazon.com](mailto:s2n-pre-notification@amazon.com).
+
+## Threat model
+
+### Shared responsibility
+
+Security is a shared responsibility between s2n-tls and the applications that integrate with it.
+
+**s2n-tls is responsible for:**
+- Correctly and securely implementing the TLS protocol and supported cryptographic algorithms
+- Providing safe defaults and secure building blocks
+- Avoiding rarely used options and extensions with a history of triggering protocol-level vulnerabilities
+
+**Your application is responsible for:**
+- Security of the host on which the process runs
+- Selecting an appropriate security policy that excludes algorithms you consider insufficient
+- Correctly configuring and using all features
+
+The following attacks are considered out of scope for s2n-tls:
+
+- On-host side-channel attacks via CPU or hardware flaws (e.g. Meltdown/Spectre)
+- Attacks requiring on-host root access to processes, memory, sockets, or files
+- Physical fault injection attacks (high voltage, electromagnetic pulses)
+- Side-channel attacks requiring physical observation
+
+If you are unsure whether an issue is in scope, report it anyway. All findings are investigated, and mitigations are considered case by case even for out-of-scope issues.
+
+### Adversarial models
+
+The following models describe the threats s2n-tls is designed to defend against. The degree of protection depends on the [security policy](/features/security-policies) you select.
+
+**Network adversary** — an active attacker with complete control over the network between client and server. This attacker can intercept and modify all messages, attempt protocol downgrades, obtain long-term keys after a session completes, exploit weak cryptographic parameters, and record encrypted traffic for future decryption (harvest now, decrypt later).
+
+**Malicious client** — in addition to the network adversary capabilities above, can attempt to bypass client certificate authentication, send crafted payloads to exploit parser flaws, offer only weak cryptographic parameters, and cause denial of service through resource exhaustion.
+
+**Malicious server** — in addition to the network adversary capabilities above, can attempt to downgrade the connection by offering weak ciphersuites or DH groups, send crafted handshake messages to exploit parser flaws, and present revoked or misissued certificates.
+
+### What to report
+
+The following are examples of security-relevant issues that should be reported through the vulnerability disclosure process:
+
+- Memory safety bugs or undefined behavior that could compromise confidentiality, integrity, or availability
+- Logic bugs leading to incorrect TLS negotiation, handshake errors, or authentication bypass
+- Negotiation of cryptographic algorithms outside the configured security policy
+- Flaws in default configurations that could lead to insecure operation
+
+The following are generally not considered vulnerabilities:
+
+- Application misuse of APIs that behave as documented
+- Issues in the operating environment (OS, networking stack, hardware)
+- Usage patterns documented as warnings in the Usage Guide
+
+## Safety mechanisms
+
+s2n-tls takes a systematic approach to data protection. The following mechanisms are built into the library.
+
+<CardGroup cols={2}>
+  <Card title="Auditable code base" icon="magnifying-glass">
+    s2n-tls code is structured for reviewability. All code is subject to code review, and the library undergoes external security evaluations on an annual basis. To date, two external code-level reviews have been completed, including one by a commercial security vendor.
+  </Card>
+  <Card title="Static analysis and fuzz testing" icon="flask">
+    In addition to code review, s2n-tls is subject to regular static analysis, fuzz testing, and penetration testing. Several penetration tests have been conducted, including two by commercial vendors.
+  </Card>
+  <Card title="Timing blinding" icon="clock">
+    When s2n-tls fails to parse a TLS record or handshake message, it adds a randomized delay of 10–30 seconds (granular to nanoseconds) before responding. This raises the cost of timing side-channel attacks by a factor of at least tens of trillions.
+  </Card>
+  <Card title="Erase on read" icon="eraser">
+    Plaintext data is encrypted or erased as quickly as possible. Decrypted data buffers are erased as they are read by the application, limiting the window in which sensitive data exists in memory.
+  </Card>
+  <Card title="Memory protection (mlock)" icon="lock">
+    s2n-tls uses operating system features to protect sensitive data from being swapped to disk or appearing in core dumps.
+  </Card>
+  <Card title="Table-based state machine" icon="table">
+    TLS and SSL state machines are driven by simple lookup tables rather than complex branching logic. This makes it structurally difficult for invalid or out-of-order states to occur.
+  </Card>
+  <Card title="Compartmentalized RNG" icon="shuffle">
+    Every thread receives two separate random number generators: one for "public" data that may appear in the clear, and one for "private" data that must remain secret. This limits the risk of predictability weaknesses leaking information across contexts.
+  </Card>
+  <Card title="Minimalist feature set" icon="minimize">
+    s2n-tls deliberately avoids implementing rarely used options, extensions, and features with a history of triggering protocol-level vulnerabilities. For example, there is no support for DTLS.
+  </Card>
+  <Card title="C safety" icon="shield-check">
+    All memory handling, string handling, and serialization in s2n-tls is wrapped in systematic boundary-enforcing checks. The library makes light use of standard C library functions to reduce exposure.
+  </Card>
+  <Card title="Modular crypto backends" icon="layer-group">
+    s2n-tls links to a separate libcrypto rather than implementing its own cryptographic primitives. Supported backends include AWS-LC, OpenSSL (1.0.2, 1.1.1, 3.0.x), LibreSSL, and BoringSSL.
+  </Card>
+</CardGroup>

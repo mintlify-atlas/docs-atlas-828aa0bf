@@ -1,0 +1,118 @@
+---
+title: "Examining the client hello"
+description: "How to access, parse, and inspect the TLS Client Hello message in s2n-tls, including extensions, cipher suites, supported groups, and the client hello callback."
+---
+
+s2n-tls stores the Client Hello it receives and exposes it to your application. You can inspect cipher suites, extensions, supported groups, and more — either during the handshake via a callback or after the fact from raw bytes.
+
+## Getting a Client Hello
+
+<Tabs>
+  <Tab title="From a connection">
+    Call `s2n_connection_get_client_hello()` to get a pointer to the `s2n_client_hello` struct.
+
+    ```c
+    struct s2n_client_hello *client_hello =
+        s2n_connection_get_client_hello(conn);
+    ```
+
+    A `NULL` value is returned if the connection has not yet received the Client Hello. The earliest point in the handshake at which this struct is available is inside the [Client Hello callback](#client-hello-callback).
+
+    <Note>
+      The stored Client Hello is no longer available after calling `s2n_connection_free_handshake()`.
+    </Note>
+  </Tab>
+  <Tab title="From raw bytes">
+    Call `s2n_client_hello_parse_message()` with a buffer containing the raw Client Hello message. Include the message header but exclude the record header.
+
+    ```c
+    struct s2n_client_hello *client_hello = NULL;
+    s2n_client_hello_parse_message(&client_hello,
+                                    raw_bytes, raw_bytes_len);
+    ```
+
+    The returned pointer behaves the same as one from `s2n_connection_get_client_hello()`, except that the memory is owned by your application. Free it when you are done:
+
+    ```c
+    s2n_client_hello_free(&client_hello);
+    ```
+  </Tab>
+</Tabs>
+
+## Examining the message
+
+Once you have an `s2n_client_hello` pointer, use the following calls to inspect its contents.
+
+| Function | What it returns |
+|---|---|
+| `s2n_client_hello_get_raw_message()` | The complete Client Hello message with random bytes zeroed out. |
+| `s2n_client_hello_get_cipher_suites()` | The list of cipher suites sent by the client. |
+| `s2n_client_hello_get_session_id()` | The session ID from the Client Hello. This may differ from the final session ID — use `s2n_connection_get_session_id()` after the handshake for the authoritative value. |
+| `s2n_client_hello_get_extensions()` | The full list of extensions in the Client Hello. |
+| `s2n_client_hello_get_extension_by_id()` | A specific extension by type ID. |
+| `s2n_client_hello_has_extension()` | Whether a specific extension is present. |
+| `s2n_client_hello_get_supported_groups()` | The list of supported groups (elliptic curves and key exchange groups). |
+
+<Note>
+  `s2n_client_hello_get_extension_by_id()` does not distinguish between a zero-length extension and a missing extension. Use `s2n_client_hello_has_extension()` to check for the presence of an extension before reading its value.
+</Note>
+
+## SSLv2 Client Hellos
+
+s2n-tls does not negotiate SSLv2, but it accepts SSLv2-formatted Client Hellos that advertise a higher protocol version such as SSLv3 or TLS 1.0. Some older clients used this as a backwards-compatibility strategy when connecting to a server that might only support SSLv2.
+
+Check `s2n_connection_get_client_hello_version()` to determine whether the Client Hello was in SSLv2 format. If it was, `s2n_connection_get_client_protocol_version()` still reports the real protocol version the client requested.
+
+<Warning>
+  SSLv2 Client Hellos are formatted differently from later versions. `s2n_client_hello_get_raw_message()` and `s2n_client_hello_get_cipher_suites()` produce differently structured data for SSLv2 Client Hellos. Consult the documentation for each function for details on SSLv2 parsing.
+</Warning>
+
+## Client Hello callback
+
+Register a callback with `s2n_config_set_client_hello_cb()` to access the Client Hello during the handshake. A common use case is adjusting the `s2n_connection` based on information in the Client Hello — for example, switching the server certificate based on the SNI extension.
+
+```c
+int my_client_hello_callback(struct s2n_connection *conn, void *ctx)
+{
+    struct s2n_client_hello *client_hello =
+        s2n_connection_get_client_hello(conn);
+
+    /* Inspect extensions, cipher suites, etc. and modify conn */
+
+    return S2N_SUCCESS;
+}
+
+s2n_config_set_client_hello_cb(config, my_client_hello_callback, ctx);
+```
+
+<Warning>
+  Modifying the connection in response to untrusted Client Hello input can be dangerous. In particular, switching from an `s2n_config` that supports TLS 1.3 to one that does not opens the server to a version downgrade attack.
+
+  If you change any connection properties based on the Server Name extension, you **must** call `s2n_connection_server_name_extension_used()` before returning from the callback.
+</Warning>
+
+Return a negative value from the callback to make s2n-tls terminate the handshake with a fatal handshake failure alert.
+
+### Callback modes
+
+<Tabs>
+  <Tab title="Blocking (default)">
+    The handshake waits for the callback to return before continuing. Use this mode for lightweight work such as logging or simple configuration changes that will not block the main thread.
+
+    ```c
+    s2n_config_set_client_hello_cb_mode(config,
+        S2N_CLIENT_HELLO_CB_BLOCKING);
+    ```
+  </Tab>
+  <Tab title="Non-blocking">
+    After the callback returns, the handshake pauses and `s2n_negotiate()` returns an error indicating the handshake is blocked on application input. This allows the application to perform expensive work — such as network calls — outside the callback without blocking the main thread. The handshake resumes only when `s2n_client_hello_cb_done()` is called.
+
+    ```c
+    s2n_config_set_client_hello_cb_mode(config,
+        S2N_CLIENT_HELLO_CB_NONBLOCKING);
+
+    /* Later, once the async work is complete: */
+    s2n_client_hello_cb_done(conn);
+    ```
+  </Tab>
+</Tabs>

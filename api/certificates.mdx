@@ -1,0 +1,140 @@
+---
+title: "Certificates API"
+description: "Reference for s2n-tls certificate and trust store functions"
+---
+
+## Loading certificates
+
+```c
+struct s2n_cert_chain_and_key *s2n_cert_chain_and_key_new(void);
+
+int s2n_cert_chain_and_key_load_pem_bytes(
+    struct s2n_cert_chain_and_key *chain_and_key,
+    uint8_t *chain_pem, uint32_t chain_pem_len,
+    uint8_t *private_key_pem, uint32_t private_key_pem_len);
+
+int s2n_cert_chain_and_key_load_pem(
+    struct s2n_cert_chain_and_key *chain_and_key,
+    const char *chain_pem, const char *private_key_pem);
+
+int s2n_cert_chain_and_key_free(struct s2n_cert_chain_and_key *cert_and_key);
+```
+
+```c
+struct s2n_cert_chain_and_key *cert = s2n_cert_chain_and_key_new();
+s2n_cert_chain_and_key_load_pem_bytes(cert,
+    (uint8_t *)cert_pem, cert_pem_len,
+    (uint8_t *)key_pem, key_pem_len);
+s2n_config_add_cert_chain_and_key_to_store(config, cert);
+/* ... use config ... */
+s2n_cert_chain_and_key_free(cert);
+```
+
+## Adding to a config
+
+```c
+int s2n_config_add_cert_chain_and_key_to_store(struct s2n_config *config,
+    struct s2n_cert_chain_and_key *cert_key_pair);
+
+int s2n_config_set_cert_chain_and_key_defaults(struct s2n_config *config,
+    struct s2n_cert_chain_and_key **cert_key_pairs,
+    uint32_t num_cert_key_pairs);
+```
+
+Servers may load multiple certificates (RSA, RSA-PSS, ECDSA). s2n-tls selects the appropriate certificate based on the client's SNI extension.
+
+## Trust store
+
+```c
+int s2n_config_set_verification_ca_location(struct s2n_config *config,
+    const char *ca_pem_filename, const char *ca_dir);
+
+int s2n_config_add_pem_to_trust_store(struct s2n_config *config,
+    const char *pem);
+
+int s2n_config_wipe_trust_store(struct s2n_config *config);
+
+int s2n_config_load_system_certs(struct s2n_config *config);
+```
+
+## SNI
+
+```c
+int s2n_set_server_name(struct s2n_connection *conn, const char *server_name);
+```
+
+Call on client connections before `s2n_negotiate()` to set the SNI extension value. The server uses this to select the matching certificate.
+
+## Host verification callback
+
+```c
+typedef uint8_t (*s2n_verify_host_fn)(const char *host_name, size_t host_name_len,
+    void *data);
+
+int s2n_config_set_verify_host_callback(struct s2n_config *config,
+    s2n_verify_host_fn, void *data);
+
+int s2n_connection_set_verify_host_callback(struct s2n_connection *conn,
+    s2n_verify_host_fn, void *data);
+```
+
+Called for each name in the peer's certificate. Return `1` to accept, `0` to reject.
+
+## OCSP stapling
+
+```c
+int s2n_config_set_status_request_type(struct s2n_config *config,
+    s2n_status_request_type type);
+
+int s2n_cert_chain_and_key_set_ocsp_data(struct s2n_cert_chain_and_key *chain_and_key,
+    const uint8_t *data, uint32_t length);
+
+int s2n_config_set_check_stapled_ocsp_response(struct s2n_config *config,
+    uint8_t check_ocsp);
+
+const uint8_t *s2n_connection_get_ocsp_response(struct s2n_connection *conn,
+    uint32_t *length);
+```
+
+`s2n_status_request_type`: `S2N_STATUS_REQUEST_NONE` or `S2N_STATUS_REQUEST_OCSP`.
+
+## Certificate transparency
+
+```c
+int s2n_cert_chain_and_key_set_sct_list(struct s2n_cert_chain_and_key *chain_and_key,
+    const uint8_t *data, uint32_t length);
+
+int s2n_config_set_ct_support_level(struct s2n_config *config,
+    s2n_ct_support_level level);
+
+const uint8_t *s2n_connection_get_sct_list(struct s2n_connection *conn,
+    uint32_t *length);
+```
+
+## Certificate inspection
+
+```c
+struct s2n_cert_chain_and_key *s2n_connection_get_selected_cert(
+    struct s2n_connection *conn);
+
+int s2n_connection_get_peer_cert_chain(struct s2n_connection *conn,
+    struct s2n_cert_chain_and_key *s2n_cert_chain_and_key);
+
+int s2n_cert_chain_get_length(const struct s2n_cert_chain_and_key *chain_and_key,
+    uint32_t *cert_length);
+
+int s2n_cert_chain_get_cert(const struct s2n_cert_chain_and_key *chain_and_key,
+    struct s2n_cert **out_cert, const uint32_t cert_idx);
+
+int s2n_cert_get_der(const struct s2n_cert *cert,
+    const uint8_t **out_cert_der, uint32_t *cert_length);
+```
+
+## User context on certificates
+
+```c
+int s2n_cert_chain_and_key_set_ctx(struct s2n_cert_chain_and_key *cert_and_key,
+    void *ctx);
+
+void *s2n_cert_chain_and_key_get_ctx(struct s2n_cert_chain_and_key *cert_and_key);
+```

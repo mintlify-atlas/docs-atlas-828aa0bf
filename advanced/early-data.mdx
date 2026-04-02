@@ -1,0 +1,186 @@
+---
+title: "Early data (0-RTT)"
+description: "How to send and receive TLS 1.3 early data in s2n-tls using session resumption or external pre-shared keys, including anti-replay protection strategies."
+---
+
+TLS 1.3 lets clients send application data before the handshake completes. This is called early data, or 0-RTT data. It is available when the client and server share a pre-established secret from either a previous session (session resumption) or an external pre-shared key (PSK).
+
+<Warning>
+  Early data has weaker security properties than data sent after a completed handshake:
+
+  - **Not forward secret.** If the PSK or session resumption secret is compromised, the early data is also compromised.
+  - **Susceptible to replay attacks.** An attacker can capture early data and successfully replay it against a server. See [RFC 8446, appendix E.5](https://tools.ietf.org/rfc/rfc8446#appendix-E.5) for details.
+
+  Do not enable early data unless you have understood and mitigated these risks.
+</Warning>
+
+## Configuring early data
+
+<Tabs>
+  <Tab title="Session resumption">
+    Enable early data on the server by setting the maximum number of early data bytes to a non-zero value. The server then issues session tickets that advertise early data support, and clients automatically use early data when presenting those tickets.
+
+    ```c
+    /* Set a server-wide default */
+    s2n_config_set_server_max_early_data_size(config, MAX_EARLY_DATA_SIZE);
+
+    /* Or set it on an individual connection */
+    s2n_connection_set_server_max_early_data_size(conn, MAX_EARLY_DATA_SIZE);
+    ```
+  </Tab>
+  <Tab title="External pre-shared keys">
+    Each PSK must individually advertise early data support. Set the maximum early data size and the cipher suite the PSK expects. If the connection will negotiate an application protocol, also set the expected protocol on the PSK — the server only accepts early data when both the cipher suite and application protocol match the values negotiated during the handshake.
+
+    ```c
+    /* Set the maximum size and required cipher suite */
+    s2n_psk_configure_early_data(psk, MAX_EARLY_DATA_SIZE,
+                                  TLS_AES_128_GCM_SHA256);
+
+    /* Optionally require a matching application protocol */
+    s2n_psk_set_application_protocol(psk,
+        (const uint8_t *)"h2", strlen("h2"));
+    ```
+  </Tab>
+</Tabs>
+
+## Sending early data
+
+Call `s2n_send_early_data()` before calling `s2n_negotiate()`. Like other s2n-tls I/O functions, it may return a blocking error multiple times before succeeding.
+
+```c
+uint8_t early_data[] = "early data to send";
+ssize_t total_data_sent = 0;
+ssize_t len = sizeof(early_data);
+
+while (total_data_sent < len) {
+    ssize_t data_sent = 0;
+    int r = s2n_send_early_data(client_conn,
+                early_data + total_data_sent,
+                len - total_data_sent,
+                &data_sent, &blocked);
+    total_data_sent += data_sent;
+    if (r == S2N_SUCCESS) {
+        break;
+    } else if (s2n_error_get_type(s2n_errno) != S2N_ERR_T_BLOCKED) {
+        exit(1);
+    }
+}
+
+/* Complete the handshake normally after early data */
+while (s2n_negotiate(client_conn, &blocked) != S2N_SUCCESS) {
+    if (s2n_error_get_type(s2n_errno) != S2N_ERR_T_BLOCKED) {
+        exit(1);
+    }
+}
+```
+
+Call `s2n_connection_get_remaining_early_data_size()` to check how many more early data bytes the client is allowed to send. If `s2n_send_early_data()` exceeds the allowed maximum, s2n-tls returns a usage error.
+
+You can stop calling `s2n_send_early_data()` at any time, even if it has not yet returned success. Once it does return success, the connection is ready to complete the handshake, but you can continue calling it to send more early data if needed.
+
+## Receiving early data
+
+Call `s2n_recv_early_data()` before calling `s2n_negotiate()`.
+
+```c
+uint8_t early_data[MAX_EARLY_DATA] = { 0 };
+ssize_t total_data_recv = 0;
+ssize_t data_recv = 0;
+
+while (s2n_recv_early_data(conn,
+           early_data + total_data_recv,
+           MAX_EARLY_DATA - total_data_recv,
+           &data_recv, &blocked) != S2N_SUCCESS) {
+    total_data_recv += data_recv;
+    if (s2n_error_get_type(s2n_errno) != S2N_ERR_T_BLOCKED) {
+        exit(1);
+    }
+}
+
+/* Complete the handshake normally after reading early data */
+while (s2n_negotiate(conn, &blocked) != S2N_SUCCESS) {
+    if (s2n_error_get_type(s2n_errno) != S2N_ERR_T_BLOCKED) {
+        exit(1);
+    }
+}
+```
+
+<Warning>
+  Once `s2n_recv_early_data()` has been called, you must keep calling it until it returns success. Stopping early leaves unread early data in the stream, which causes subsequent calls to `s2n_negotiate()` to return fatal errors. Calling `s2n_recv_early_data()` again after it returns success is harmless — it has no effect on the connection.
+</Warning>
+
+## Adding anti-replay protection
+
+**s2n-tls does not include anti-replay protection automatically.** Effective anti-replay protection for a multi-server application requires shared external state. Without it, an attacker can replay early data that was originally sent to server A against server B.
+
+The TLS 1.3 specification describes two approaches:
+
+<AccordionGroup>
+  <Accordion title="Single-use tickets (RFC 8446, section 8.1)">
+    Store valid tickets in a shared database and delete each ticket after it is used once. Use `s2n_connection_get_negotiated_psk_identity_length()` and `s2n_connection_get_negotiated_psk_identity()` to retrieve the ticket identifier (pre-shared key identity) associated with offered early data.
+  </Accordion>
+  <Accordion title="Client Hello recording (RFC 8446, section 8.2)">
+    Instead of tracking outstanding valid tickets, record unique values from recent ClientHellos. The ClientHello message can be retrieved with `s2n_connection_get_client_hello()`, and the pre-shared key identity with `s2n_connection_get_negotiated_psk_identity()`. Note that s2n-tls does not currently provide methods to retrieve the validated binders or the `ClientHello.random`.
+  </Accordion>
+</AccordionGroup>
+
+### Hooking anti-replay logic into s2n-tls
+
+Use `s2n_config_set_early_data_cb()` to register an `s2n_early_data_cb()` callback. Inside the callback, call `s2n_offered_early_data_accept()` or `s2n_offered_early_data_reject()` on the **s2n_offered_early_data** pointer.
+
+**Synchronous callback:**
+
+```c
+int s2n_early_data_cb_impl(struct s2n_connection *conn,
+                            struct s2n_offered_early_data *early_data)
+{
+    uint16_t identity_size = 0;
+    s2n_connection_get_negotiated_psk_identity_length(conn, &identity_size);
+
+    uint8_t *identity = malloc(identity_size);
+    s2n_connection_get_negotiated_psk_identity(conn, identity, identity_size);
+
+    if (user_verify_single_use_ticket(identity)) {
+        s2n_offered_early_data_accept(early_data);
+    } else {
+        s2n_offered_early_data_reject(early_data);
+    }
+
+    free(identity);
+    return S2N_SUCCESS;
+}
+```
+
+**Asynchronous callback:**
+
+Return `S2N_SUCCESS` without accepting or rejecting. The handshake pauses with `S2N_ERR_T_BLOCKED` and `s2n_blocked_status` set to `S2N_BLOCKED_ON_APPLICATION_INPUT` until the application calls `s2n_offered_early_data_accept()` or `s2n_offered_early_data_reject()` from another thread.
+
+```c
+void *user_accept_or_reject_early_data(void *arg)
+{
+    struct s2n_offered_early_data *early_data =
+        (struct s2n_offered_early_data *) arg;
+    if (user_slowly_verify_early_data(early_data)) {
+        s2n_offered_early_data_accept(early_data);
+    } else {
+        s2n_offered_early_data_reject(early_data);
+    }
+    return NULL;
+}
+
+int s2n_early_data_cb_async_impl(struct s2n_connection *conn,
+                                  struct s2n_offered_early_data *early_data)
+{
+    pthread_t thread_id;
+    pthread_create(&thread_id, NULL,
+                   user_accept_or_reject_early_data, (void *) early_data);
+    return S2N_SUCCESS;
+}
+```
+
+### User context for early data decisions
+
+Call `s2n_offered_early_data_get_context_length()` and `s2n_offered_early_data_get_context()` to examine the optional user context associated with the offered early data. Unlike most s2n-tls callbacks, the context is not set when the callback is registered — it is associated with the specific PSK or session ticket being used.
+
+- For external PSKs, set the context with `s2n_psk_set_early_data_context()`.
+- For session tickets, use `s2n_connection_set_server_early_data_context()` to set the context the server includes in new session tickets. Because the server serializes this context when creating a ticket, it is a byte buffer rather than a void pointer.

@@ -1,0 +1,143 @@
+---
+title: "Connections"
+description: "How to create, configure, reuse, and inspect s2n_connection objects, including memory management strategies for memory-constrained environments."
+---
+
+The `s2n_connection` struct is the central object in s2n-tls. Every TLS session is represented by a connection: you create one, run the handshake, exchange encrypted data, shut down, and then either free or wipe and reuse the connection object.
+
+## Creating a connection
+
+Call `s2n_connection_new()` with the mode of the local endpoint: `S2N_CLIENT` or `S2N_SERVER`.
+
+```c
+/* For a TLS server */
+struct s2n_connection *conn = s2n_connection_new(S2N_SERVER);
+if (!conn) {
+    fprintf(stderr, "s2n_connection_new failed\n");
+    exit(1);
+}
+
+/* For a TLS client */
+struct s2n_connection *conn = s2n_connection_new(S2N_CLIENT);
+if (!conn) {
+    fprintf(stderr, "s2n_connection_new failed\n");
+    exit(1);
+}
+```
+
+After creating a connection, associate a config and a socket file descriptor:
+
+```c
+s2n_connection_set_config(conn, config);
+s2n_connection_set_fd(conn, sockfd);
+```
+
+Call `s2n_connection_free()` to release the connection when you are done with it. `s2n_connection_free()` performs its own internal wipe of sensitive data; you do not need to call `s2n_connection_wipe()` first.
+
+```c
+s2n_connection_free(conn);
+```
+
+## Connection memory
+
+The `s2n_connection` struct is approximately 4 KB, with some variation depending on configuration. Two additional heap allocations dominate memory usage: handshake scratch space and I/O buffers.
+
+### Releasing handshake memory
+
+After the TLS handshake completes successfully, call `s2n_connection_free_handshake()` to release the memory that was allocated specifically for the handshake.
+
+```c
+s2n_blocked_status blocked = S2N_NOT_BLOCKED;
+if (s2n_negotiate(conn, &blocked) == S2N_SUCCESS) {
+    /* Handshake complete — release handshake memory */
+    s2n_connection_free_handshake(conn);
+}
+```
+
+<Note>
+  Freeing handshake memory means some functions that print handshake details may no longer produce meaningful output. Also, if you later call `s2n_connection_wipe()` to reuse the connection, s2n-tls will re-allocate handshake memory for the next session.
+</Note>
+
+### Releasing I/O buffers
+
+The `in` and `out` I/O buffers consume the most memory on a connection after the handshake completes. For long-lived connections that spend time idle or in keep-alive state, call `s2n_connection_release_buffers()` to free those buffers and reduce memory overhead.
+
+```c
+/* Connection is idle — release I/O buffers */
+s2n_connection_release_buffers(conn);
+```
+
+The buffers are reallocated automatically the next time the connection needs to send or receive data.
+
+## Connection reuse
+
+Allocating and freeing a connection object for every TLS session has a measurable cost. For high-throughput servers, reuse connection objects instead.
+
+After a connection is fully shut down, call `s2n_connection_wipe()` to erase all state — including pending reads — and prepare the struct for a new session.
+
+```c
+s2n_blocked_status blocked = S2N_NOT_BLOCKED;
+
+/* Shut down the TLS session */
+s2n_shutdown(conn, &blocked);
+close(sockfd);
+
+/* Wipe and prepare for reuse */
+if (s2n_connection_wipe(conn) < 0) {
+    fprintf(stderr, "s2n_connection_wipe: %s\n", s2n_strerror(s2n_errno, "EN"));
+}
+
+/* Reuse the connection for a new socket */
+s2n_connection_set_config(conn, config);
+s2n_connection_set_fd(conn, new_sockfd);
+```
+
+<Tip>
+  `s2n_connection_wipe()` is more efficient than `s2n_connection_free()` followed by `s2n_connection_new()` because it avoids repeated heap allocation and deallocation.
+</Tip>
+
+## Inspecting connection information
+
+s2n-tls provides functions to query connection parameters after the handshake completes. Call these after `s2n_negotiate()` returns success.
+
+### Protocol version
+
+Three functions expose TLS protocol version information. The return values correspond to the constants `S2N_TLS10`, `S2N_TLS11`, `S2N_TLS12`, and `S2N_TLS13`.
+
+| Function | Returns |
+|---|---|
+| `s2n_connection_get_actual_protocol_version()` | The version negotiated during the handshake. This is the authoritative value. |
+| `s2n_connection_get_server_protocol_version()` | The highest version the server supports. |
+| `s2n_connection_get_client_protocol_version()` | The highest version the client advertised. |
+
+```c
+int version = s2n_connection_get_actual_protocol_version(conn);
+/* version == S2N_TLS13 for a TLS 1.3 session */
+```
+
+### Cipher suite
+
+`s2n_connection_get_cipher()` returns a human-readable string in OpenSSL format, such as `"TLS_AES_128_GCM_SHA256"`.
+
+```c
+const char *cipher = s2n_connection_get_cipher(conn);
+fprintf(stdout, "Cipher: %s\n", cipher);
+```
+
+<Warning>
+  Before the handshake completes, `s2n_connection_get_cipher()` returns `"TLS_NULL_WITH_NULL_NULL"`. This is a placeholder, not the negotiated cipher.
+</Warning>
+
+### Example: logging post-handshake info
+
+```c
+s2n_blocked_status blocked = S2N_NOT_BLOCKED;
+if (s2n_negotiate(conn, &blocked) == S2N_SUCCESS) {
+    fprintf(stdout,
+            "Handshake complete — protocol: %d  cipher: %s\n",
+            s2n_connection_get_actual_protocol_version(conn),
+            s2n_connection_get_cipher(conn));
+}
+```
+
+For a complete list of connection inspection functions — including ALPN protocol, SNI hostname, peer certificate details, and cipher IANA values — see the [API reference](/api/overview).

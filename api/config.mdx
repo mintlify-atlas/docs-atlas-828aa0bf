@@ -1,0 +1,152 @@
+---
+title: "Config API"
+description: "Reference for s2n_config functions — creating, configuring, and freeing connection configurations"
+---
+
+An `s2n_config` holds shared settings used across multiple connections: certificates, trust store, security policy, and callbacks. One config can be safely shared across many connections for reading.
+
+## Creating and freeing configs
+
+```c
+struct s2n_config *s2n_config_new(void);
+struct s2n_config *s2n_config_new_minimal(void);
+int s2n_config_free(struct s2n_config *config);
+```
+
+- `s2n_config_new()` — creates a config pre-loaded with system trust certificates and default settings.
+- `s2n_config_new_minimal()` — creates a config with an empty trust store (no system certs). Call `s2n_config_load_system_certs()` to add them later.
+- `s2n_config_free()` — frees all memory associated with the config.
+
+## Security policy
+
+```c
+int s2n_config_set_cipher_preferences(struct s2n_config *config, const char *version);
+```
+
+Sets the security policy controlling which TLS versions, cipher suites, and signature schemes are allowed. See [Security Policies](/features/security-policies) for available policy names.
+
+```c
+// Use the latest recommended defaults
+s2n_config_set_cipher_preferences(config, "default");
+
+// Use a fixed versioned policy that will never change
+s2n_config_set_cipher_preferences(config, "20240501");
+```
+
+## Certificates
+
+```c
+int s2n_config_add_cert_chain_and_key_to_store(struct s2n_config *config,
+    struct s2n_cert_chain_and_key *cert_key_pair);
+
+int s2n_config_set_cert_chain_and_key_defaults(struct s2n_config *config,
+    struct s2n_cert_chain_and_key **cert_key_pairs, uint32_t num_cert_key_pairs);
+```
+
+Adds a certificate and private key pair to the config. See [Certificates API](/api/certificates) for how to load a certificate.
+
+## Trust store
+
+```c
+int s2n_config_set_verification_ca_location(struct s2n_config *config,
+    const char *ca_pem_filename, const char *ca_dir);
+
+int s2n_config_add_pem_to_trust_store(struct s2n_config *config, const char *pem);
+
+int s2n_config_wipe_trust_store(struct s2n_config *config);
+
+int s2n_config_load_system_certs(struct s2n_config *config);
+```
+
+<Note>
+Call `s2n_config_wipe_trust_store()` before adding certificates when using a private CA to avoid implicitly trusting unexpected public CAs loaded by `s2n_config_new()`.
+</Note>
+
+## Client authentication
+
+```c
+int s2n_config_set_client_auth_type(struct s2n_config *config,
+    s2n_cert_auth_type client_auth_type);
+
+int s2n_config_get_client_auth_type(struct s2n_config *config,
+    s2n_cert_auth_type *client_auth_type);
+```
+
+`s2n_cert_auth_type` values:
+- `S2N_CERT_AUTH_NONE` — no client certificate required (default)
+- `S2N_CERT_AUTH_REQUIRED` — client must present a valid certificate
+- `S2N_CERT_AUTH_OPTIONAL` — client may present a certificate
+
+## OCSP and certificate transparency
+
+```c
+int s2n_config_set_status_request_type(struct s2n_config *config,
+    s2n_status_request_type type);
+
+int s2n_config_set_check_stapled_ocsp_response(struct s2n_config *config,
+    uint8_t check_ocsp);
+
+int s2n_config_set_ct_support_level(struct s2n_config *config,
+    s2n_ct_support_level level);
+```
+
+## ALPN protocol preferences
+
+```c
+int s2n_config_set_protocol_preferences(struct s2n_config *config,
+    const char *const *protocols, int protocol_count);
+
+int s2n_config_append_protocol_preference(struct s2n_config *config,
+    const uint8_t *protocol, uint8_t protocol_len);
+```
+
+## Session resumption
+
+```c
+int s2n_config_set_session_tickets_onoff(struct s2n_config *config, uint8_t enabled);
+int s2n_config_set_session_cache_onoff(struct s2n_config *config, uint8_t enabled);
+int s2n_config_set_session_state_lifetime(struct s2n_config *config,
+    uint64_t lifetime_in_secs);
+int s2n_config_add_ticket_crypto_key(struct s2n_config *config,
+    const uint8_t *name, uint32_t name_len,
+    uint8_t *key, uint32_t key_len, uint64_t intro_time_in_seconds_from_epoch);
+```
+
+## Blinding
+
+```c
+int s2n_config_set_max_blinding_delay(struct s2n_config *config, uint32_t seconds);
+```
+
+Sets the maximum delay (in seconds) applied after a peer-triggered error. Default is 30 seconds. Lowering this reduces protection against timing side-channel attacks.
+
+## Client Hello callback
+
+```c
+int s2n_config_set_client_hello_cb(struct s2n_config *config,
+    s2n_client_hello_fn client_hello_callback, void *ctx);
+
+int s2n_config_set_client_hello_cb_mode(struct s2n_config *config,
+    s2n_client_hello_cb_mode cb_mode);
+```
+
+See [Examining the Client Hello](/advanced/client-hello) for usage.
+
+## Custom clocks
+
+```c
+int s2n_config_set_wall_clock(struct s2n_config *config,
+    s2n_clock_time_nanoseconds clock_fn, void *ctx);
+
+int s2n_config_set_monotonic_clock(struct s2n_config *config,
+    s2n_clock_time_nanoseconds clock_fn, void *ctx);
+```
+
+## User context
+
+```c
+int s2n_config_set_ctx(struct s2n_config *config, void *ctx);
+int s2n_config_get_ctx(struct s2n_config *config, void **ctx);
+```
+
+Attach arbitrary application data to a config for retrieval in callbacks.
